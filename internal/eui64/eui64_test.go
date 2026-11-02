@@ -17,7 +17,6 @@ func TestParseMAC(t *testing.T) {
 		" 02:00:00:00:00:01 ",
 	}
 	for _, in := range valid {
-		in := in
 		t.Run("valid_"+in, func(t *testing.T) {
 			t.Parallel()
 			hw, err := ParseMAC(in)
@@ -41,7 +40,6 @@ func TestParseMAC(t *testing.T) {
 		"00112233445",             // 11 hex digits
 	}
 	for _, in := range invalid {
-		in := in
 		t.Run("invalid_"+in, func(t *testing.T) {
 			t.Parallel()
 			if _, err := ParseMAC(in); err == nil {
@@ -81,7 +79,6 @@ func TestDerive(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			mac, err := ParseMAC(tt.mac)

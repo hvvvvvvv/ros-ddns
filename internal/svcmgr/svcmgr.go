@@ -1,8 +1,7 @@
 // Package svcmgr manages the operating-system service that hosts ros-ddns.
 //
-// It wraps github.com/kardianos/service so the command package does not depend
-// on the library directly, and so platform branching and control semantics stay
-// testable without a real service manager.
+// It wraps github.com/kardianos/service so platform branching and control
+// semantics stay testable without a real service manager.
 package svcmgr
 
 import (
@@ -31,24 +30,13 @@ const (
 	ActionStatus    = "status"
 )
 
-// Type aliases keep the kardianos/service types out of the command package.
+// Type aliases used by the daemon's service adapter.
 type (
 	Service = kservice.Service
 	// Interface is implemented by the daemon adapter passed to New.
 	Interface = kservice.Interface
-	Status    = kservice.Status
 	Logger    = kservice.Logger
 )
-
-// Status values used by StatusText.
-const (
-	StatusUnknown = kservice.StatusUnknown
-	StatusRunning = kservice.StatusRunning
-	StatusStopped = kservice.StatusStopped
-)
-
-// ErrNotInstalled reports that the service is not registered.
-var ErrNotInstalled = kservice.ErrNotInstalled
 
 // Options describes the service registration. Run control actions do not need
 // any field; Install records the absolute paths in the service definition.

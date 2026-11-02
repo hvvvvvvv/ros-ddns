@@ -4,7 +4,6 @@ package redact
 import (
 	"encoding/json"
 	"net/url"
-	"sort"
 	"strings"
 
 	"ros-ddns/internal/config"
@@ -58,7 +57,6 @@ func New(secrets []string) *Redactor {
 			}
 		}
 	}
-	sort.Slice(r.secrets, func(i, j int) bool { return len(r.secrets[i].value) > len(r.secrets[j].value) })
 	return r
 }
 
@@ -78,8 +76,8 @@ func (r *Redactor) Replace(message string) string {
 }
 
 func (r *Redactor) replacePart(message string) string {
-	// Match longest first against the original text. Marking all overlapping
-	// spans prevents either partial secrets or replacements inside our marker.
+	// Match against the original text and mark the union of matching spans.
+	// This hides overlapping secrets regardless of their discovery order.
 	var hidden []bool
 	for _, secret := range r.secrets {
 		for offset := 0; offset < len(message); {

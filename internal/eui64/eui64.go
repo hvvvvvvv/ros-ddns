@@ -59,9 +59,7 @@ func ParseMAC(s string) (net.HardwareAddr, error) {
 		return nil, fmt.Errorf("invalid MAC %q: all-zero address", s)
 	}
 
-	out := make(net.HardwareAddr, len(hw))
-	copy(out, hw)
-	return out, nil
+	return hw, nil
 }
 
 // Derive builds an EUI-64 IPv6 address from the first 64 bits of base and the
