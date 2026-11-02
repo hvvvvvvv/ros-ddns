@@ -3,6 +3,7 @@ package alidns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -50,7 +51,50 @@ func newSDKAPI(cfg config.ProviderConfig) (*sdkAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sdkAPI{client: client, httpClient: &http.Client{Timeout: cfg.Timeout.Duration}}, nil
+	return &sdkAPI{client: client, httpClient: &http.Client{
+		Timeout: cfg.Timeout.Duration,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			return newRedirectError(req.Response)
+		},
+	}}, nil
+}
+
+// redirectError is a permanent endpoint/protocol failure, not a network error.
+type redirectError struct {
+	status   int
+	location string
+}
+
+type noRedirectTransport struct{ *http.Transport }
+
+func (t *noRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.Transport.RoundTrip(req)
+	if err == nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// Malformed Location is parsed before CheckRedirect and would otherwise
+		// become a credential-bearing url.Error classified as a network failure.
+		resp.Body.Close()
+		return nil, newRedirectError(resp)
+	}
+	return resp, err
+}
+
+func (e *redirectError) Error() string {
+	return fmt.Sprintf("HTTP %d redirect refused (Location: %q)", e.status, e.location)
+}
+
+func newRedirectError(resp *http.Response) *redirectError {
+	location := "<missing>"
+	if resp.Header.Get("Location") != "" {
+		location = "<invalid>"
+		if target, err := resp.Location(); err == nil && target.Opaque == "" && (target.Scheme == "http" || target.Scheme == "https") {
+			// Omit userinfo, signatures, security tokens and fragments.
+			target.User = nil
+			target.RawQuery, target.Fragment, target.RawFragment = "", "", ""
+			target.ForceQuery = false
+			location = target.String()
+		}
+	}
+	return &redirectError{status: resp.StatusCode, location: location}
 }
 
 // The generated methods have no context parameter. Bind a context through the
@@ -76,10 +120,21 @@ func (c contextHTTPClient) Call(request *http.Request, transport *http.Transport
 		pool.IdleConnTimeout = 90 * time.Second
 		pool.MaxIdleConns = 16
 		pool.MaxIdleConnsPerHost = 4
-		c.api.httpClient.Transport = pool
+		c.api.httpClient.Transport = &noRedirectTransport{pool}
 		c.api.idleTransport.Store(pool)
 	})
-	return c.api.httpClient.Do(request.Clone(c.ctx))
+	response, err := c.api.httpClient.Do(request.Clone(c.ctx))
+	if response != nil && response.StatusCode >= 300 && response.StatusCode < 400 {
+		response.Body.Close()
+		// Do not propagate net/http's url.Error: it prints the raw Location and
+		// implements net.Error. Also reject 3xx that do not invoke CheckRedirect.
+		return nil, newRedirectError(response)
+	}
+	var redirect *redirectError
+	if errors.As(err, &redirect) {
+		return nil, redirect // Strip url.Error without changing network error chains.
+	}
+	return response, err
 }
 
 func (s *sdkAPI) CloseIdleConnections() {
@@ -106,17 +161,26 @@ func (s *sdkAPI) describe(ctx context.Context, request describeRequest) (describ
 		return describeResult{}, errors.New("DescribeSubDomainRecords returned an empty response")
 	}
 	body := response.Body
-	result := describeResult{TotalCount: dara.Int64Value(body.TotalCount)}
-	if body.DomainRecords != nil {
-		for _, record := range body.DomainRecords.Record {
+	result := describeResult{
+		TotalCount:    dara.Int64Value(body.TotalCount),
+		HasTotalCount: body.TotalCount != nil,
+		HasRecords:    body.DomainRecords != nil && body.DomainRecords.Record != nil,
+	}
+	if result.HasRecords {
+		result.Records = make([]remoteRecord, 0, len(body.DomainRecords.Record))
+		for i, record := range body.DomainRecords.Record {
 			if record == nil {
-				return describeResult{}, errors.New("DescribeSubDomainRecords returned a nil record")
+				return describeResult{}, fmt.Errorf("DescribeSubDomainRecords record %d is nil; refusing to write", i+1)
 			}
-			result.Records = append(result.Records, remoteRecord{
+			candidate := remoteRecord{
 				RecordID: dara.StringValue(record.RecordId), RR: dara.StringValue(record.RR),
 				Type: dara.StringValue(record.Type), Value: dara.StringValue(record.Value),
 				TTL: dara.Int64Value(record.TTL), Line: dara.StringValue(record.Line), Status: dara.StringValue(record.Status),
-			})
+			}
+			if err := candidate.validate(); err != nil {
+				return describeResult{}, fmt.Errorf("DescribeSubDomainRecords record %d: %w; refusing to write", i+1, err)
+			}
+			result.Records = append(result.Records, candidate)
 		}
 	}
 	return result, nil

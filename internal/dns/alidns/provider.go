@@ -35,8 +35,24 @@ type remoteRecord struct {
 }
 
 type describeResult struct {
-	Records    []remoteRecord
-	TotalCount int64
+	Records       []remoteRecord
+	TotalCount    int64
+	HasTotalCount bool
+	HasRecords    bool
+}
+
+func (r remoteRecord) validate() error {
+	for _, field := range []struct{ name, value string }{
+		{"RecordId", r.RecordID}, {"RR", r.RR}, {"Type", r.Type}, {"Line", r.Line}, {"Value", r.Value},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("missing or empty %s", field.name)
+		}
+	}
+	if r.TTL <= 0 {
+		return errors.New("missing or invalid TTL (must be positive)")
+	}
+	return nil
 }
 
 // api deliberately contains no SDK models or status/delete operations.
@@ -124,7 +140,7 @@ func (p *provider) Ensure(ctx context.Context, r dns.Record, recordIDHint string
 
 func (p *provider) findRecords(ctx context.Context, r dns.Record) ([]remoteRecord, error) {
 	var matches []remoteRecord
-	var seen int64
+	var seen, total int64
 	for page := int64(1); ; page++ {
 		var result describeResult
 		err := p.call(ctx, "DescribeSubDomainRecords", func() error {
@@ -137,21 +153,32 @@ func (p *provider) findRecords(ctx context.Context, r dns.Record) ([]remoteRecor
 		if err != nil {
 			return nil, err
 		}
-		for _, candidate := range result.Records {
+		if !result.HasTotalCount || !result.HasRecords {
+			return nil, fmt.Errorf("aliyun: DescribeSubDomainRecords page %d is missing TotalCount or DomainRecords.Record; refusing to write", page)
+		}
+		if result.TotalCount < 0 {
+			return nil, fmt.Errorf("aliyun: DescribeSubDomainRecords page %d has negative TotalCount; refusing to write", page)
+		}
+		if page == 1 {
+			total = result.TotalCount
+		} else if result.TotalCount != total {
+			return nil, fmt.Errorf("aliyun: DescribeSubDomainRecords page %d changed TotalCount from %d to %d; refusing to write", page, total, result.TotalCount)
+		}
+		want := min(int64(pageSize), total-seen)
+		if int64(len(result.Records)) != want {
+			return nil, fmt.Errorf("aliyun: DescribeSubDomainRecords page %d returned %d records, expected %d (TotalCount %d); refusing to write", page, len(result.Records), want, total)
+		}
+		for i, candidate := range result.Records {
+			if err := candidate.validate(); err != nil {
+				return nil, fmt.Errorf("aliyun: DescribeSubDomainRecords page %d record %d: %w; refusing to write", page, i+1, err)
+			}
 			// Line is part of the binding identity. A hint must never select another line.
 			if candidate.Line == r.Line && strings.EqualFold(candidate.RR, r.RR) && strings.EqualFold(candidate.Type, r.Type) {
 				matches = append(matches, candidate)
 			}
 		}
 		seen += int64(len(result.Records))
-		if result.TotalCount > 0 {
-			if seen >= result.TotalCount {
-				return matches, nil
-			}
-			if len(result.Records) == 0 {
-				return nil, errors.New("aliyun: DescribeSubDomainRecords returned an incomplete record list; refusing to write")
-			}
-		} else if len(result.Records) < pageSize {
+		if seen == total {
 			return matches, nil
 		}
 	}
@@ -240,6 +267,10 @@ type codedError interface {
 
 func retryable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var redirect *redirectError
+	if errors.As(err, &redirect) {
 		return false
 	}
 	if code, status, ok := errorDetails(err); ok {

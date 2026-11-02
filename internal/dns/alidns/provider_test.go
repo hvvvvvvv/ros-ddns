@@ -3,13 +3,17 @@ package alidns
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,7 +45,11 @@ func (f *fakeAPI) describe(ctx context.Context, r describeRequest) (describeResu
 	if f.describeFn != nil {
 		return f.describeFn(ctx, r)
 	}
-	return describeResult{Records: f.records, TotalCount: int64(len(f.records))}, nil
+	return completeDescribe(f.records, int64(len(f.records))), nil
+}
+
+func completeDescribe(records []remoteRecord, total int64) describeResult {
+	return describeResult{Records: records, TotalCount: total, HasTotalCount: true, HasRecords: true}
 }
 
 func (f *fakeAPI) add(ctx context.Context, r dns.Record) (string, error) {
@@ -252,7 +260,9 @@ func TestEnsureRetries(t *testing.T) {
 				}
 				switch operation {
 				case "describe":
-					f.describeFn = func(context.Context, describeRequest) (describeResult, error) { return describeResult{}, nextError() }
+					f.describeFn = func(context.Context, describeRequest) (describeResult, error) {
+						return completeDescribe(nil, 0), nextError()
+					}
 				case "add":
 					f.addFn = func(context.Context, dns.Record) (string, error) { return "added-id", nextError() }
 				case "update":
@@ -321,6 +331,8 @@ func TestRetryClassification(t *testing.T) {
 		{"EOF", io.EOF, true},
 		{"unexpected EOF", io.ErrUnexpectedEOF, true},
 		{"request timeout", context.DeadlineExceeded, true},
+		{"redirect", &redirectError{status: http.StatusFound, location: "https://example.com/"}, false},
+		{"wrapped redirect", &url.Error{Op: "Post", URL: "https://example.com/", Err: &redirectError{status: http.StatusTemporaryRedirect}}, false},
 		{"canceled", context.Canceled, false},
 		{"unknown", errors.New("invalid request"), false},
 	}
@@ -342,7 +354,8 @@ func TestEnsureChecksAllPagesBeforeWriting(t *testing.T) {
 			r, current := testRecord()
 			firstPage := make([]remoteRecord, 100)
 			for i := range firstPage {
-				firstPage[i] = remoteRecord{RR: "unrelated", Type: r.Type, Line: r.Line}
+				firstPage[i] = current
+				firstPage[i].RecordID, firstPage[i].RR = fmt.Sprintf("unrelated-%d", i), "unrelated"
 			}
 			firstPage[0] = current
 			last := current
@@ -354,9 +367,9 @@ func TestEnsureChecksAllPagesBeforeWriting(t *testing.T) {
 				}
 				switch q.PageNumber {
 				case 1:
-					return describeResult{Records: firstPage, TotalCount: 101}, nil
+					return completeDescribe(firstPage, 101), nil
 				case 2:
-					return describeResult{Records: []remoteRecord{last}, TotalCount: 101}, nil
+					return completeDescribe([]remoteRecord{last}, 101), nil
 				default:
 					t.Fatalf("unexpected page %d", q.PageNumber)
 					return describeResult{}, nil
@@ -380,11 +393,136 @@ func TestEnsureChecksAllPagesBeforeWriting(t *testing.T) {
 func TestEnsureIncompletePageDoesNotWrite(t *testing.T) {
 	r, _ := testRecord()
 	f := &fakeAPI{describeFn: func(context.Context, describeRequest) (describeResult, error) {
-		return describeResult{TotalCount: 1}, nil
+		return completeDescribe(nil, 1), nil
 	}}
 	_, err := testProvider(f).Ensure(context.Background(), r, "")
 	if err == nil || len(f.adds)+len(f.updates) != 0 {
 		t.Fatalf("error = %v, calls = %+v", err, f)
+	}
+}
+
+func TestEnsureRejectsIncompleteRecords(t *testing.T) {
+	for _, field := range []string{"RecordId", "RR", "Type", "Line", "Value", "TTL"} {
+		for _, unmatched := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/unmatched=%t", field, unmatched), func(t *testing.T) {
+				r, current := testRecord()
+				if unmatched {
+					current.RR = "unrelated"
+				}
+				switch field {
+				case "RecordId":
+					current.RecordID = ""
+				case "RR":
+					current.RR = ""
+				case "Type":
+					current.Type = ""
+				case "Line":
+					current.Line = ""
+				case "Value":
+					current.Value = " "
+				case "TTL":
+					current.TTL = 0
+				}
+				f := &fakeAPI{records: []remoteRecord{current}}
+				got, err := testProvider(f).Ensure(context.Background(), r, "")
+				if err == nil || !strings.Contains(err.Error(), field) || got != (dns.EnsureResult{}) || len(f.adds)+len(f.updates) != 0 {
+					t.Fatalf("result = %+v, error = %v, writes = %d", got, err, len(f.adds)+len(f.updates))
+				}
+			})
+		}
+	}
+}
+
+func TestEnsureRejectsIncompletePages(t *testing.T) {
+	r, current := testRecord()
+	full := make([]remoteRecord, pageSize)
+	for i := range full {
+		full[i] = current
+		full[i].RecordID = fmt.Sprintf("record-%d", i)
+	}
+	one := []remoteRecord{current}
+	for _, tc := range []struct {
+		name  string
+		pages []describeResult
+	}{
+		{"empty object", []describeResult{{}}},
+		{"missing first count", []describeResult{{HasRecords: true}}},
+		{"missing first records", []describeResult{{HasTotalCount: true}}},
+		{"negative count", []describeResult{completeDescribe(nil, -1)}},
+		{"zero count with records", []describeResult{completeDescribe(one, 0)}},
+		{"empty positive first page", []describeResult{completeDescribe(nil, 1)}},
+		{"too many records", []describeResult{completeDescribe(append(one, current), 1)}},
+		{"short first page", []describeResult{completeDescribe(one, 101)}},
+		{"oversized first page", []describeResult{completeDescribe(append(append([]remoteRecord{}, full...), current), 101)}},
+		{"missing second count", []describeResult{completeDescribe(full, 101), {Records: one, HasRecords: true}}},
+		{"missing second records", []describeResult{completeDescribe(full, 101), {TotalCount: 101, HasTotalCount: true}}},
+		{"second count becomes zero", []describeResult{completeDescribe(full, 101), completeDescribe(nil, 0)}},
+		{"second count increases", []describeResult{completeDescribe(full, 101), completeDescribe(one, 102)}},
+		{"second count decreases", []describeResult{completeDescribe(full, 101), completeDescribe(nil, 100)}},
+		{"empty second page", []describeResult{completeDescribe(full, 101), completeDescribe(nil, 101)}},
+		{"excess final page", []describeResult{completeDescribe(full, 101), completeDescribe(append(one, current), 101)}},
+		{"short final page", []describeResult{completeDescribe(full, 102), completeDescribe(one, 102)}},
+		{"short middle page", []describeResult{completeDescribe(full, 201), completeDescribe(full[:99], 201)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeAPI{describeFn: func(_ context.Context, q describeRequest) (describeResult, error) {
+				if q.PageNumber > int64(len(tc.pages)) {
+					t.Fatalf("requested unexpected page %d", q.PageNumber)
+				}
+				return tc.pages[q.PageNumber-1], nil
+			}}
+			p := testProvider(f)
+			p.sleep = func(context.Context, time.Duration) error {
+				t.Error("invalid response must not be retried")
+				return nil
+			}
+			got, err := p.Ensure(context.Background(), r, current.RecordID)
+			if err == nil || !strings.Contains(err.Error(), "refusing to write") || got != (dns.EnsureResult{}) || len(f.adds)+len(f.updates) != 0 {
+				t.Fatalf("result = %+v, error = %v, writes = %d", got, err, len(f.adds)+len(f.updates))
+			}
+			if len(f.describes) != len(tc.pages) {
+				t.Fatalf("describes = %d, want %d", len(f.describes), len(tc.pages))
+			}
+		})
+	}
+}
+
+func TestEnsureCompletePagination(t *testing.T) {
+	for _, total := range []int{0, 1, 100, 101, 200, 201} {
+		for _, match := range []bool{false, true} {
+			if total == 0 && match {
+				continue
+			}
+			t.Run(fmt.Sprintf("total=%d/match=%t", total, match), func(t *testing.T) {
+				r, current := testRecord()
+				records := make([]remoteRecord, total)
+				for i := range records {
+					records[i] = current
+					records[i].RecordID, records[i].RR = fmt.Sprintf("other-%d", i), "other"
+				}
+				if match {
+					records[total-1] = current
+				}
+				f := &fakeAPI{describeFn: func(_ context.Context, q describeRequest) (describeResult, error) {
+					start := int(q.PageNumber-1) * pageSize
+					if start > total || (total > 0 && start == total) {
+						t.Fatalf("unexpected page %d", q.PageNumber)
+					}
+					return completeDescribe(records[start:min(start+pageSize, total)], int64(total)), nil
+				}}
+				got, err := testProvider(f).Ensure(context.Background(), r, "")
+				if err != nil || len(f.describes) != max(1, (total+pageSize-1)/pageSize) || len(f.updates) != 0 {
+					t.Fatalf("result = %+v, error = %v, describes = %d, updates = %d", got, err, len(f.describes), len(f.updates))
+				}
+				if match {
+					if got.RecordID != current.RecordID || got.Changed || len(f.adds) != 0 {
+						t.Fatalf("matching result = %+v, adds = %d", got, len(f.adds))
+					}
+				} else if !got.Changed || got.RecordID != "added-id" || got.Value != r.Value || len(f.adds) != 1 {
+					t.Fatalf("added result = %+v, adds = %d", got, len(f.adds))
+				}
+			})
+		}
 	}
 }
 
@@ -405,7 +543,10 @@ func TestEnsureCancellation(t *testing.T) {
 				}
 				p.sleep = func(ctx context.Context, _ time.Duration) error { cancel(); return sleepContext(ctx, time.Hour) }
 			case "before write":
-				f.describeFn = func(context.Context, describeRequest) (describeResult, error) { cancel(); return describeResult{}, nil }
+				f.describeFn = func(context.Context, describeRequest) (describeResult, error) {
+					cancel()
+					return completeDescribe(nil, 0), nil
+				}
 			}
 			_, err := p.Ensure(ctx, r, "")
 			if !errors.Is(err, context.Canceled) || len(f.adds)+len(f.updates) != 0 || len(f.describes) > 1 {
@@ -482,6 +623,202 @@ func TestNew(t *testing.T) {
 			_, err := New(cfg)
 			if err == nil || !strings.Contains(err.Error(), field) || strings.Contains(err.Error(), valid.AccessKeySecret) {
 				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func testSDKAPI(t *testing.T, server *httptest.Server) *sdkAPI {
+	t.Helper()
+	s, err := newSDKAPI(config.ProviderConfig{
+		Endpoint: strings.TrimPrefix(server.URL, "http://"), RegionID: "cn-hangzhou",
+		AccessKeyID: "test-key", AccessKeySecret: "test-secret", SecurityToken: "test-token",
+		Timeout: config.Duration{Duration: 3 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.client.Protocol = dara.String("HTTP")
+	t.Cleanup(s.CloseIdleConnections)
+	return s
+}
+
+func TestSDKRejectsRedirectsWithoutRetry(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, operation := range []string{"describe", "add", "update"} {
+			t.Run(fmt.Sprintf("%d/%s", status, operation), func(t *testing.T) {
+				var requests, redirected atomic.Int64
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/redirected" {
+						redirected.Add(1)
+						_, _ = io.WriteString(w, `{"RecordId":"redirected-id","TotalCount":0,"DomainRecords":{"Record":[]}}`)
+						return
+					}
+					requests.Add(1)
+					if r.Method != http.MethodPost {
+						t.Errorf("SDK method = %s, want POST", r.Method)
+					}
+					w.Header().Set("Location", "http://redirect-user:redirect-password@"+r.Host+"/redirected?AccessKeyId=test-key&SecurityToken=test-token&Signature=query-secret#fragment-secret")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, "body-secret")
+				}))
+				t.Cleanup(server.Close)
+				s := testSDKAPI(t, server)
+				r, current := testRecord()
+				f := &fakeAPI{}
+				switch operation {
+				case "describe":
+					f.describeFn = s.describe
+				case "add":
+					f.addFn = s.add
+				case "update":
+					current.Value = "192.0.2.11"
+					f.records, f.updateFn = []remoteRecord{current}, s.update
+				}
+				p := testProvider(f)
+				sleeps := 0
+				p.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
+				got, err := p.Ensure(context.Background(), r, "")
+				var redirect *redirectError
+				if !errors.As(err, &redirect) || redirect.status != status || retryable(err) || got != (dns.EnsureResult{}) {
+					t.Fatalf("result = %+v, error = %v, want permanent redirect failure", got, err)
+				}
+				if requests.Load() != 1 || redirected.Load() != 0 || sleeps != 0 {
+					t.Fatalf("requests = %d, redirected = %d, sleeps = %d; want 1, 0, 0", requests.Load(), redirected.Load(), sleeps)
+				}
+				if operation == "describe" && len(f.adds)+len(f.updates) != 0 {
+					t.Fatal("redirected describe caused writes")
+				}
+				if !strings.Contains(err.Error(), server.URL+"/redirected") {
+					t.Fatalf("error lacks sanitized Location: %v", err)
+				}
+				for _, secret := range []string{"test-key", "test-secret", "test-token", "redirect-user", "redirect-password", "query-secret", "fragment-secret", "body-secret"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatalf("redirect error leaked %q: %v", secret, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSDKRejects3xxWithMissingOrInvalidLocation(t *testing.T) {
+	for _, tc := range []struct {
+		name, location string
+		status         int
+	}{
+		{"302 without Location", "", http.StatusFound},
+		{"307 without Location", "", http.StatusTemporaryRedirect},
+		{"304", "", http.StatusNotModified},
+		{"malformed Location", "http://test-key:test-secret@localhost/%zz?SecurityToken=test-token", http.StatusFound},
+		{"opaque Location", "https:test-secret?SecurityToken=test-token", http.StatusTemporaryRedirect},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(server.Close)
+			f := &fakeAPI{describeFn: testSDKAPI(t, server).describe}
+			r, _ := testRecord()
+			got, err := testProvider(f).Ensure(context.Background(), r, "")
+			var redirect *redirectError
+			if !errors.As(err, &redirect) || redirect.status != tc.status || retryable(err) || requests.Load() != 1 || got.Changed || len(f.adds)+len(f.updates) != 0 {
+				t.Fatalf("result = %+v, error = %v, requests = %d, writes = %d", got, err, requests.Load(), len(f.adds)+len(f.updates))
+			}
+			for _, secret := range []string{"test-key", "test-secret", "test-token"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("error leaked %q: %v", secret, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSDKDescribeRejectsIncompleteResponses(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"empty object", `{}`},
+		{"missing count", `{"DomainRecords":{"Record":[]}}`},
+		{"null count", `{"TotalCount":null,"DomainRecords":{"Record":[]}}`},
+		{"missing DomainRecords", `{"TotalCount":0}`},
+		{"null DomainRecords", `{"TotalCount":0,"DomainRecords":null}`},
+		{"missing Record array", `{"TotalCount":0,"DomainRecords":{}}`},
+		{"null Record array", `{"TotalCount":0,"DomainRecords":{"Record":null}}`},
+		{"nil record", `{"TotalCount":1,"DomainRecords":{"Record":[null]}}`},
+	}
+	for _, field := range []string{"RecordId", "RR", "Type", "Line", "Value", "TTL"} {
+		for _, mode := range []string{"missing", "null", "empty"} {
+			record := map[string]any{"RecordId": "id", "RR": "home", "Type": "A", "Line": "default", "Value": "192.0.2.10", "TTL": 600}
+			switch mode {
+			case "missing":
+				delete(record, field)
+			case "null":
+				record[field] = nil
+			case "empty":
+				if field == "TTL" {
+					record[field] = 0
+				} else {
+					record[field] = ""
+				}
+			}
+			body, err := json.Marshal(map[string]any{"TotalCount": 1, "DomainRecords": map[string]any{"Record": []any{record}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases = append(cases, struct{ name, body string }{mode + " " + field, string(body)})
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(server.Close)
+			f := &fakeAPI{describeFn: testSDKAPI(t, server).describe}
+			p := testProvider(f)
+			p.sleep = func(context.Context, time.Duration) error {
+				t.Error("invalid response must not be retried")
+				return nil
+			}
+			r, _ := testRecord()
+			got, err := p.Ensure(context.Background(), r, "")
+			if err == nil || !strings.Contains(err.Error(), "refusing to write") || got != (dns.EnsureResult{}) || len(f.adds)+len(f.updates) != 0 || requests.Load() != 1 {
+				t.Fatalf("result = %+v, error = %v, writes = %d, requests = %d", got, err, len(f.adds)+len(f.updates), requests.Load())
+			}
+		})
+	}
+}
+
+func TestSDKDescribeCompleteResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		count      int64
+	}{
+		{"explicit empty array", `{"TotalCount":0,"DomainRecords":{"Record":[]}}`, 0},
+		{"single record", `{"TotalCount":1,"DomainRecords":{"Record":[{"RecordId":"id","RR":"home","Type":"A","Line":"default","Value":"192.0.2.10","TTL":600}]}}`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(server.Close)
+			s := testSDKAPI(t, server)
+			got, err := s.describe(context.Background(), describeRequest{Domain: "example.com", SubDomain: "home.example.com", Type: "A", PageNumber: 1, PageSize: pageSize})
+			if err != nil || !got.HasRecords || !got.HasTotalCount || got.TotalCount != tc.count || int64(len(got.Records)) != tc.count {
+				t.Fatalf("describe = %+v, error = %v", got, err)
+			}
+			f := &fakeAPI{describeFn: s.describe}
+			r, _ := testRecord()
+			result, err := testProvider(f).Ensure(context.Background(), r, "")
+			if err != nil || result.Changed != (tc.count == 0) || len(f.adds) != 1-int(tc.count) || len(f.updates) != 0 {
+				t.Fatalf("result = %+v, error = %v, adds = %d, updates = %d", result, err, len(f.adds), len(f.updates))
 			}
 		})
 	}
