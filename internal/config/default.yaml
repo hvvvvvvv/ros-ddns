@@ -1,0 +1,65 @@
+# Default ros-ddns configuration, written on a daemon start when the configured
+# file does not exist (or when a service-managed start cannot load it).
+#
+# The placeholder RouterOS and Aliyun credentials below are empty on purpose:
+# the daemon starts, logs synchronization errors and retries, and the WebUI is
+# available for completing the configuration. Replace the placeholders either
+# in this file (mode 0600) or in the WebUI, then restart if needed.
+log:
+  level: info
+  format: text
+
+runtime:
+  pollInterval: 10s
+  stableFor: 0s
+  reconcileTimeout: 30s
+  verifyInterval: 10m
+  syncOnStart: true
+  maxBackoff: 5m
+
+state:
+  # The generated file replaces this placeholder with an absolute path below the
+  # configuration directory, so the first start works from any working directory.
+  path: state.json
+
+api:
+  # Keep the default loopback binding for the first start; changing api.listen,
+  # api.token or log.format requires a service restart.
+  listen: 127.0.0.1:8080
+  token: ""
+
+routeros:
+  url: https://192.168.88.1
+  username: admin
+  password: ""
+  timeout: 10s
+  tls:
+    insecureSkipVerify: true
+
+dns:
+  providers:
+    ali-main:
+      type: aliyun
+      endpoint: alidns.aliyuncs.com
+      regionId: cn-hangzhou
+      accessKeyId: ""
+      accessKeySecret: ""
+      timeout: 10s
+      qps: 5
+
+items:
+  # Placeholder item: replace the interface, domain and credentials. Failures
+  # are reported in the log and the in-app notifications, and retried.
+  - name: home-ipv4
+    source:
+      interface: pppoe-out1
+      family: ipv4
+      select:
+        scope: public
+        index: 0
+    domains:
+      - provider: ali-main
+        domain: example.com
+        rr: home
+        ttl: 600
+        line: default

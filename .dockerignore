@@ -1,0 +1,21 @@
+# Non-source workspace artifacts: build outputs, Go caches, local config,
+# runtime state, logs, credentials and scratch files. Never in the build context.
+build
+
+# Host deployment data directory (compose mounts ./data)
+data
+
+# Local config and environment files
+.env
+.env.*
+!.env.example
+config.yaml
+
+# Not needed by the image build
+docs/images
+.git
+
+# Stray outputs
+*.exe
+*.test
+*.out

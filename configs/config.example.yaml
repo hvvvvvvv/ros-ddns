@@ -1,0 +1,89 @@
+# Environment references are expanded only in YAML scalar values, not comments.
+# Expanded values are strings; use YAML literals for numeric and boolean fields.
+log:
+  level: info            # debug|info|warn|error
+  format: text           # text|json
+
+runtime:
+  pollInterval: 10s      # address polling interval
+  stableFor: 0s          # how long a new value must stay stable before it is applied
+  reconcileTimeout: 30s  # timeout for one DNS + address-list reconciliation
+  verifyInterval: 10m    # periodic full reconciliation, 0 disables
+  syncOnStart: true      # force one reconciliation after the first successful poll
+  maxBackoff: 5m
+
+state:
+  path: ./data/state.json  # empty string = memory only; runtime still takes an instance lock
+  # Default lock: state.path + ".lock"; override with the CLI -lock-file flag.
+
+api:
+  listen: 127.0.0.1:8080
+  token: ${ROS_DDNS_API_TOKEN:-}
+
+routeros:
+  url: https://192.168.88.1     # base path allowed; /rest is appended
+  username: ddns-api
+  password: ${ROS_PASSWORD}
+  timeout: 10s
+  tls:
+    insecureSkipVerify: true    # self-signed router certificate; use false + caFile with a trusted CA
+    caFile: ""
+
+dns:
+  providers:
+    ali-main:
+      type: aliyun
+      endpoint: alidns.aliyuncs.com
+      regionId: cn-hangzhou
+      accessKeyId: ${ALI_ACCESS_KEY_ID}
+      accessKeySecret: ${ALI_ACCESS_KEY_SECRET}
+      securityToken: ${ALI_SECURITY_TOKEN:-}
+      timeout: 10s
+      qps: 5
+
+items:
+  - name: home-ipv4
+    source:
+      interface: pppoe-out1
+      family: ipv4            # record type is derived: A
+      select:
+        scope: public
+        index: 0
+    domains:                  # bind the same IPv4 value to several names
+      - provider: ali-main
+        domain: example.com
+        rr: home
+        ttl: 600
+        line: default
+      - provider: ali-main
+        domain: example.net
+        rr: "@"
+        ttl: 600
+    addressList:
+      list: ddns-home-ipv4
+      # comment defaults to ros-ddns:home-ipv4; empty timeout means a static entry
+
+  - name: home-ipv6
+    source:
+      interface: pppoe-out1
+      family: ipv6            # record type is derived: AAAA
+      # Optional. When set and valid, the record value is the first 64 bits of
+      # the selected interface address combined with the EUI-64 IID of this MAC.
+      eui64-mac: "00:1A:2B:3C:4D:5E"
+      select:
+        scope: public
+        # With multiple prefixes, pin one here, e.g. 240e:399:45ce::/48
+        prefix: ""
+        index: 0
+    domains:                  # bind the same derived value to several names
+      - provider: ali-main
+        domain: example.com
+        rr: home
+        ttl: 600
+      - provider: ali-main
+        domain: example.org
+        rr: "@"
+        ttl: 600
+    addressList:
+      list: ddns-home-ipv6
+      # timeout: 1h   # non-empty makes the ROS entry dynamic (cleared on reboot)

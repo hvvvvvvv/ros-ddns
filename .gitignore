@@ -1,0 +1,20 @@
+# All non-source artifacts live under build/: build outputs, Go caches, local
+# config (plus its .bak), runtime state, logs, credentials and scratch files.
+# Never commit build/; it contains secrets and machine-local state.
+/build/
+
+# Host-deployment runtime directory created by docker compose (./data:/data).
+# Local development now keeps its state under build/data/ instead.
+/data/
+
+# Stray outputs from ad-hoc builds outside the wrapper/Makefile
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local config and environment files used by deployment flows
+/config.yaml
+.env
+.env.*
+!.env.example
