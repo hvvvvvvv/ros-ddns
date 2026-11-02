@@ -253,3 +253,7 @@ API 默认回环监听；非回环地址必须设置非空 `api.token`。远程�
 - [阿里云配置指南](docs/aliyun-setup.md)：RAM、upsert、多义保护、线路、TTL 和手工验收。
 
 真实 RouterOS / 阿里云写入检查须在自己的环境执行；部署指南中的操作清单不代表已完成写入验收。历史验收记录（当时使用的 dry-run 模式现已移除）见 [验收记录](docs/webui.md#6-验证与验收记录)。
+
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE) 开源，Copyright (c) 2026 hvvvvvvv。
