@@ -35,7 +35,7 @@ routeros:
     caFile: ./certs/router-ca.pem
 ```
 
-`caFile` 相对进程工作目录，客户端将其加入系统信任池；系统已信任时可省略。代码默认验证证书，仓库示例显式设置 `insecureSkipVerify: true`，复制后需调整。`true` 与非空 `caFile` 互斥；临时跳过验证不能检验证书部署是否正确。
+`caFile` 相对进程工作目录，客户端将其加入系统信任池；系统已信任时可省略。代码与内嵌默认配置均使用 `insecureSkipVerify: false`，默认验证证书。`true` 与非空 `caFile` 互斥；临时跳过验证不能检验证书部署是否正确。
 
 配置 URL 只写 origin 加可选基础路径，例如 `https://router.example.net/router`，客户端追加 `/rest`。hostname 必须非空；端口可省略，显式提供时须为十进制 1–65535，不能留空。userinfo、查询串、fragment、末尾 `/rest` 均会被拒绝；账号密码用独立字段。`routeros.timeout` 缺省为 `10s`，显式零或负值无效。
 

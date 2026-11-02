@@ -1,6 +1,5 @@
 import { api, isQuietError } from '/assets/api.js';
 import { ask, dismissDialog, banner, setText, toast } from '/assets/dom.js';
-import { store } from '/assets/store.js';
 import { Dashboard } from '/assets/dashboard.js';
 import { Config } from '/assets/config.js';
 import { Logs } from '/assets/logs.js';
@@ -49,7 +48,6 @@ function openLogin(required = false) {
 }
 
 api.addEventListener('unauthorized', () => {
-  store.set({ connected: false });
   document.getElementById('logout').hidden = true;
   setText(document.getElementById('ready-badge'), '需要登录');
   document.getElementById('ready-badge').className = 'badge warning';
@@ -128,7 +126,6 @@ async function navigate() {
     if (link.dataset.route === route) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  store.set({ route });
   document.title = `ros-ddns · ${{ dashboard: '运行概览', items: '同步项目', config: '配置管理', logs: '实时日志', notifications: '事件通知' }[route]}`;
   if ((route === 'config' || route === 'items') && !config.draft && !api.locked) config.load();
   if (route === 'logs') logs.render();

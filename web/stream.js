@@ -77,7 +77,6 @@ export class LiveFeed {
   constructor({ historyPath, streamPath, kind, onEntries, onState, onRestart = null, metaPath = '/api/v1/meta', cursor = () => '' }) {
     Object.assign(this, { historyPath, streamPath, kind, onEntries, onState, onRestart, metaPath, cursor });
     this.running = false;
-    this.initialized = false;
     this.historyReady = false;
     this.failures = 0;
     this.startedAt = '';
@@ -126,7 +125,6 @@ export class LiveFeed {
   restartGeneration() {
     const wasRunning = this.running;
     this.stop();
-    this.initialized = false;
     this.historyReady = false;
     this.failures = 0;
     this.onRestart?.();
@@ -149,7 +147,7 @@ export class LiveFeed {
     this.onState('连接已暂停', 'neutral');
   }
 
-  reset() { this.stop(); this.initialized = false; this.historyReady = false; this.failures = 0; }
+  reset() { this.stop(); this.historyReady = false; this.failures = 0; }
 
   async refresh() {
     if (!this.running) return;
@@ -167,7 +165,6 @@ export class LiveFeed {
       if (!this.running || life !== this.life) return;
       this.onEntries(collection(payload, this.kind), { initial: !this.historyReady });
       this.historyReady = true;
-      this.initialized = true;
       if (this.fallback) this.onState('轮询中 · 3 秒 / 次', 'warning');
     } catch (error) {
       if (!isQuietError(error) && this.running) this.onState('历史加载失败 · 自动重试', 'error');

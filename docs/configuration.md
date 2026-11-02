@@ -1,6 +1,6 @@
 # 配置参考
 
-本页对应最终配置加载器与校验代码。默认配置由守护进程首次启动时生成（内嵌模板为 `internal/config/default.yaml`，字符串字段都带默认值的环境引用）；字段说明如下，CLI 用法见 [README](../README.md#cli-合同)。
+本页对应最终配置加载器与校验代码。默认配置由守护进程首次启动时生成（内嵌模板为 `internal/config/default.yaml`，字符串字段都带默认值的环境引用）；字段说明如下，CLI 用法见 [README](../README.md#命令行)。
 
 ## 1. 解析与默认值
 
@@ -104,7 +104,7 @@ api:
 
 URL 会去首尾空白和末尾 `/`。例如 `https://router.example.net/base` 的 REST 前缀是 `/base/rest`；不要在配置中填写 `https://user:pass@host`、`https://host/rest`、`https://host?token=...` 或 `https://host#...`，空查询分隔符 `?` / 空 fragment `#` 也被拒绝。端口可以省略，但显式空端口、服务名或非十进制内容无效；`http://:80`、`https://host:0`、`https://host:65536` 和空 IPv6 主机均被拒绝。
 
-代码默认验证 TLS；仓库示例显式跳过验证，复制后应按 [RouterOS 指南](routeros-setup.md#2-启用-rest证书与-www-ssl) 调整。`-check` 不验证 CA 文件存在或证书内容。
+代码与内嵌默认配置均使用 `insecureSkipVerify: false`，默认验证 TLS 证书；私有 CA 的配置方式见 [RouterOS 指南](routeros-setup.md#2-启用-rest证书与-www-ssl)。`-check` 不验证 CA 文件存在或证书内容。
 
 ### 3.5 `dns.providers.<名字>`
 

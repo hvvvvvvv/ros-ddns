@@ -6,7 +6,6 @@ const LIMIT = 1000;
 
 export class Logs {
   constructor(host) {
-    this.host = host;
     this.entries = [];
     this.buffer = [];
     this.seen = new Set();

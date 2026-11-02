@@ -1,6 +1,5 @@
 import { api, isQuietError } from '/assets/api.js';
 import { el, button, emptyState, banner, setText, toast, ask, rememberConfigSecrets } from '/assets/dom.js';
-import { store } from '/assets/store.js';
 import { clone, getAt, setAt, pathLabel, canonicalPath, normalizeErrors, createField, readOnlyField, section } from '/assets/forms.js';
 
 const durationPattern = /^(?:0|(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h)(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))*)$/;
@@ -12,8 +11,6 @@ const grid = (...children) => el('div', { class: 'form-grid' }, ...children);
 
 export class Config {
   constructor(host, itemsHost, { onApplied } = {}) {
-    this.host = host;
-    this.itemsHost = itemsHost;
     this.onApplied = onApplied;
     this.draft = null;
     this.fields = new Map();
@@ -113,7 +110,6 @@ export class Config {
 
   updateDirty() {
     this.dirty = this.draft != null && JSON.stringify(this.draft) !== this.baseline;
-    store.set({ dirty: this.dirty });
     for (const [id, fallback] of [['config-dirty', '配置'], ['items-config-status', '同步项目']]) {
       const badge = document.getElementById(id);
       if (!badge) continue;
@@ -218,7 +214,7 @@ export class Config {
           this.duration([...prefix, 'timeout'], '请求超时', '10s', '10s'),
           this.field([...prefix, 'qps'], { label: '请求速率 QPS', type: 'number', min: 1, step: 1, fallback: 5, help: '单位：请求 / 秒，必须为整数且不少于 1。默认 5。' })));
     });
-    return section(`03 / DNS 服务商 · ${names.length}`, '服务商名称用于关联下方的域名记录。凭据仅在表单中编辑。',
+    return section(`03 / DNS 服务商 · ${names.length}`, '服务商名称用于关联「同步项目」页面中的域名记录。凭据仅在表单中编辑。',
       cards.length ? cards : [emptyState('尚未添加 DNS 服务商', '添加 Aliyun DNS 凭据，再将域名关联到服务商。')], add);
   }
 
@@ -270,7 +266,7 @@ export class Config {
       sourceFields,
       el('div', { class: 'section-heading subsection-heading' }, el('h4', { text: '域名记录' }), addDomain),
       domainRows.length ? domainTable : el('p', { class: 'compact-empty muted', text: '暂无域名记录。仅同步地址列表时可留空。' }),
-      !Object.keys(this.providers).length ? el('p', { class: 'help warning-text', text: '尚无可选服务商，请先在上方添加 DNS 服务商。' }) : null,
+      !Object.keys(this.providers).length ? el('p', { class: 'help warning-text', text: '尚无可选服务商，请先在「配置管理」页面的「DNS 服务商」分组中添加服务商。' }) : null,
       el('div', { class: 'address-editor' }, addressEnabled.node, item.addressList ? grid(
         this.field([...prefix, 'addressList', 'list'], { label: '列表名称', required: true, placeholder: 'ddns-home-ipv4' }),
         this.rosDuration([...prefix, 'addressList', 'timeout'], '条目过期时间', '', '1h', '留空为静态条目；非空时 RouterOS 重启会清除动态条目。'),

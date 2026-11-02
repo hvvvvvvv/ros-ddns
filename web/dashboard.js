@@ -1,6 +1,5 @@
 import { api, isQuietError } from '/assets/api.js';
 import { el, button, emptyState, banner, setText, timeText, toneOf, toast, redactObject, copyButton } from '/assets/dom.js';
-import { store } from '/assets/store.js';
 
 function valueText(value) { return value == null || value === '' ? '—' : value; }
 
@@ -27,7 +26,6 @@ export function statusItems(snapshot) {
 
 export class Dashboard {
   constructor(host) {
-    this.host = host;
     this.cards = new Map();
     this.meta = {};
     this.snapshot = null;
@@ -76,12 +74,10 @@ export class Dashboard {
         if (life && life !== this.life) return;
         this.render(snapshot);
         banner(this.alert, '');
-        store.set({ connected: true });
         setText(document.getElementById('dashboard-updated'), `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`);
       } catch (error) {
         if (!isQuietError(error)) {
           banner(this.alert, `${error.message} 正在自动重试；下方保留上次状态。`);
-          store.set({ connected: false });
           setText(document.getElementById('ready-badge'), '连接中断');
           document.getElementById('ready-badge').className = 'badge error';
         }

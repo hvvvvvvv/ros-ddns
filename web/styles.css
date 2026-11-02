@@ -72,7 +72,6 @@ nav a[aria-current="page"] small { color: var(--accent-dark); }
 .sidebar-footer { margin-top: auto; padding: 22px 8px 0; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .sidebar-footer small { display: block; font-size: 10px; margin-top: 6px; color: #819098; }
 .live-dot { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--accent); }
-.count { padding: 1px 5px; min-width: 20px; text-align: center; border-radius: 6px; font-size: 10px; background: var(--accent); color: white; margin-left: auto; }
 .dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: #d99326; margin-left: auto; }
 main { padding: 36px clamp(20px, 3vw, 48px) 20px; min-width: 0; max-width: 1730px; width: 100%; margin: 0 auto; }
 .view { min-height: calc(100dvh - 200px); }
@@ -252,7 +251,6 @@ input[type="checkbox"] { margin: 2px 0 0; width: 17px; height: 17px; accent-colo
   nav { flex-direction: row; gap: 5px; }
   nav a { flex: 1; justify-content: center; gap: 8px; padding: 9px 7px; font-size: 12px; }
   nav a small { display: none; }
-  nav .count { margin-left: 0; }
   .nav-symbol { width: 18px; height: 18px; }
   .nav-symbol svg { width: 18px; height: 18px; }
   main { padding: 25px 20px 20px; }
@@ -276,7 +274,6 @@ input[type="checkbox"] { margin: 2px 0 0; width: 17px; height: 17px; accent-colo
   .sidebar { top: 100px; padding-inline: 6px; }
   nav a { font-size: 10px; gap: 4px; padding: 10px 4px; min-height: 36px; }
   .nav-symbol { display: none; }
-  nav .count { min-width: 16px; padding-inline: 3px; font-size: 9px; }
   .dirty-dot { position: absolute; top: 4px; right: 5px; width: 5px; height: 5px; }
   main { padding: 24px 14px 18px; }
   .page-heading { flex-wrap: wrap; gap: 12px; }
@@ -331,7 +328,6 @@ input[type="checkbox"] { margin: 2px 0 0; width: 17px; height: 17px; accent-colo
   .list-meta { padding-inline: 16px; }
   .list-meta .caption { font-size: 10px; }
   .notification-row { padding: 17px 14px; gap: 10px; flex-wrap: wrap; }
-  .notification-row > .button, .notification-row > .caption { margin-left: 43px; }
   .event-meta { gap: 6px; }
   .toast-stack { top: 165px; }
   .modal { padding: 24px 20px; }
