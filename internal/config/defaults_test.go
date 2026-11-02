@@ -2,44 +2,184 @@ package config
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
+func clearDefaultConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"ROS_DDNS_LISTEN",
+		"ROS_DDNS_API_TOKEN",
+		"ROS_DDNS_ROUTEROS_URL",
+		"ROS_DDNS_ROUTEROS_USERNAME",
+		"ROS_PASSWORD",
+		"ROS_DDNS_CA_FILE",
+		"ALI_ACCESS_KEY_ID",
+		"ALI_ACCESS_KEY_SECRET",
+		"ALI_SECURITY_TOKEN",
+		"ROS_DDNS_INTERFACE",
+		"ROS_DDNS_DOMAIN",
+		"ROS_DDNS_LOG_LEVEL",
+		"ROS_DDNS_LOG_FORMAT",
+		"ROS_DDNS_POLL_INTERVAL",
+		"ROS_DDNS_STABLE_FOR",
+		"ROS_DDNS_RECONCILE_TIMEOUT",
+		"ROS_DDNS_VERIFY_INTERVAL",
+		"ROS_DDNS_SYNC_ON_START",
+		"ROS_DDNS_MAX_BACKOFF",
+		"ROS_DDNS_STATE_PATH",
+	} {
+		value, wasSet := os.LookupEnv(name)
+		t.Cleanup(func() {
+			var err error
+			if wasSet {
+				err = os.Setenv(name, value)
+			} else {
+				err = os.Unsetenv(name)
+			}
+			if err != nil {
+				t.Errorf("restore environment variable %s: %v", name, err)
+			}
+		})
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset environment variable %s: %v", name, err)
+		}
+	}
+}
+
 func TestDefaultConfigYAML(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	raw := DefaultConfigYAML()
 	if len(raw) == 0 {
 		t.Fatal("default configuration is empty")
 	}
-	// The default must be self-contained: a service start has no access to a
-	// shell environment, so unresolved references would break the first start.
-	if bytes.Contains(raw, []byte("${")) {
-		t.Fatalf("default configuration contains an environment reference:\n%s", raw)
+	// Every reference needs a fallback so a service can start without a shell
+	// environment.
+	references := regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*\}`).FindAll(raw, -1)
+	if len(references) != bytes.Count(raw, []byte("${")) {
+		t.Fatalf("default configuration contains an environment reference without a fallback:\n%s", raw)
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	cfg, err := Parse(raw, path)
 	if err != nil {
 		t.Fatalf("parse default configuration: %v\n%s", err, raw)
 	}
-	if cfg.API.Listen != "127.0.0.1:8080" {
-		t.Errorf("api.listen = %q", cfg.API.Listen)
+	if len(cfg.Items) != 1 || len(cfg.DNS.Providers) != 1 {
+		t.Fatalf("items=%d providers=%d, want 1 and 1", len(cfg.Items), len(cfg.DNS.Providers))
 	}
-	if cfg.API.Token != "" {
-		t.Errorf("api.token = %q, want empty", cfg.API.Token)
+	provider, ok := cfg.DNS.Providers["ali-main"]
+	if !ok {
+		t.Fatal("default provider ali-main is missing")
 	}
-	if cfg.State.Path != "state.json" {
-		t.Errorf("state.path = %q", cfg.State.Path)
+	if len(cfg.Items[0].Domains) != 1 {
+		t.Fatalf("item domains=%d, want 1", len(cfg.Items[0].Domains))
+	}
+	for _, field := range []struct{ name, got, want string }{
+		{"api.listen", cfg.API.Listen, "127.0.0.1:8080"},
+		{"api.token", cfg.API.Token, ""},
+		{"state.path", cfg.State.Path, "state.json"},
+		{"routeros.url", cfg.RouterOS.URL, "https://192.168.88.1"},
+		{"routeros.username", cfg.RouterOS.Username, "admin"},
+		{"routeros.password", cfg.RouterOS.Password, ""},
+		{"routeros.tls.caFile", cfg.RouterOS.TLS.CAFile, ""},
+		{"provider.accessKeyId", provider.AccessKeyID, ""},
+		{"provider.accessKeySecret", provider.AccessKeySecret, ""},
+		{"provider.securityToken", provider.SecurityToken, ""},
+		{"item.source.interface", cfg.Items[0].Source.Interface, "pppoe-out1"},
+		{"item.domain", cfg.Items[0].Domains[0].Domain, "example.com"},
+	} {
+		if field.got != field.want {
+			t.Errorf("%s = %q, want %q", field.name, field.got, field.want)
+		}
+	}
+	if cfg.RouterOS.TLS.InsecureSkipVerify {
+		t.Error("default routeros TLS should verify certificates")
+	}
+	if cfg.Log.Level != "info" || cfg.Log.Format != "text" {
+		t.Errorf("default log = %q/%q, want info/text", cfg.Log.Level, cfg.Log.Format)
+	}
+	if cfg.Runtime.PollInterval.Duration != 10*time.Second ||
+		cfg.Runtime.StableFor.Duration != 0 ||
+		cfg.Runtime.ReconcileTimeout.Duration != 30*time.Second ||
+		cfg.Runtime.VerifyInterval.Duration != 10*time.Minute ||
+		!cfg.Runtime.SyncOnStart ||
+		cfg.Runtime.MaxBackoff.Duration != 5*time.Minute {
+		t.Errorf("default runtime = %+v", cfg.Runtime)
+	}
+}
+
+func TestDefaultConfigEnvOverrides(t *testing.T) {
+	clearDefaultConfigEnv(t)
+	t.Setenv("ROS_DDNS_LISTEN", "0.0.0.0:8080")
+	t.Setenv("ROS_DDNS_API_TOKEN", "token")
+	t.Setenv("ROS_DDNS_ROUTEROS_URL", "https://router.example")
+	t.Setenv("ROS_DDNS_ROUTEROS_USERNAME", "ddns")
+	t.Setenv("ROS_PASSWORD", "pw")
+	t.Setenv("ROS_DDNS_CA_FILE", "/data/ca.pem")
+	t.Setenv("ALI_ACCESS_KEY_ID", "id")
+	t.Setenv("ALI_ACCESS_KEY_SECRET", "secret")
+	t.Setenv("ALI_SECURITY_TOKEN", "sts")
+	t.Setenv("ROS_DDNS_INTERFACE", "wan")
+	t.Setenv("ROS_DDNS_DOMAIN", "host.example.com")
+	t.Setenv("ROS_DDNS_LOG_LEVEL", "debug")
+	t.Setenv("ROS_DDNS_LOG_FORMAT", "json")
+	t.Setenv("ROS_DDNS_POLL_INTERVAL", "2s")
+	t.Setenv("ROS_DDNS_STABLE_FOR", "5s")
+	t.Setenv("ROS_DDNS_RECONCILE_TIMEOUT", "15s")
+	t.Setenv("ROS_DDNS_VERIFY_INTERVAL", "0s")
+	t.Setenv("ROS_DDNS_SYNC_ON_START", "false")
+	t.Setenv("ROS_DDNS_MAX_BACKOFF", "1m")
+	t.Setenv("ROS_DDNS_STATE_PATH", "/tmp/custom-state.json")
+
+	cfg, err := Parse(DefaultConfigYAML(), filepath.Join(t.TempDir(), "config.yaml"))
+	if err != nil {
+		t.Fatalf("parse default configuration with environment overrides: %v", err)
 	}
 	if len(cfg.Items) != 1 || len(cfg.DNS.Providers) != 1 {
 		t.Fatalf("items=%d providers=%d, want 1 and 1", len(cfg.Items), len(cfg.DNS.Providers))
 	}
-	provider := cfg.DNS.Providers["ali-main"]
-	if provider.AccessKeyID != "" || provider.AccessKeySecret != "" {
-		t.Errorf("default provider credentials should be empty placeholders: %+v", provider)
+	provider, ok := cfg.DNS.Providers["ali-main"]
+	if !ok {
+		t.Fatal("default provider ali-main is missing")
 	}
-	if cfg.RouterOS.TLS.InsecureSkipVerify != true {
-		t.Error("default routeros TLS should skip verification for the first start")
+	if len(cfg.Items[0].Domains) != 1 {
+		t.Fatalf("item domains=%d, want 1", len(cfg.Items[0].Domains))
+	}
+	for _, field := range []struct{ name, got, want string }{
+		{"api.listen", cfg.API.Listen, "0.0.0.0:8080"},
+		{"api.token", cfg.API.Token, "token"},
+		{"routeros.url", cfg.RouterOS.URL, "https://router.example"},
+		{"routeros.username", cfg.RouterOS.Username, "ddns"},
+		{"routeros.password", cfg.RouterOS.Password, "pw"},
+		{"routeros.tls.caFile", cfg.RouterOS.TLS.CAFile, "/data/ca.pem"},
+		{"provider.accessKeyId", provider.AccessKeyID, "id"},
+		{"provider.accessKeySecret", provider.AccessKeySecret, "secret"},
+		{"provider.securityToken", provider.SecurityToken, "sts"},
+		{"item.source.interface", cfg.Items[0].Source.Interface, "wan"},
+		{"item.domain", cfg.Items[0].Domains[0].Domain, "host.example.com"},
+		{"log.level", cfg.Log.Level, "debug"},
+		{"log.format", cfg.Log.Format, "json"},
+		{"state.path", cfg.State.Path, "/tmp/custom-state.json"},
+	} {
+		if field.got != field.want {
+			t.Errorf("%s = %q, want %q", field.name, field.got, field.want)
+		}
+	}
+	if cfg.RouterOS.TLS.InsecureSkipVerify {
+		t.Error("routeros TLS should still verify certificates with environment overrides")
+	}
+	if cfg.Runtime.PollInterval.Duration != 2*time.Second ||
+		cfg.Runtime.StableFor.Duration != 5*time.Second ||
+		cfg.Runtime.ReconcileTimeout.Duration != 15*time.Second ||
+		cfg.Runtime.VerifyInterval.Duration != 0 ||
+		cfg.Runtime.SyncOnStart ||
+		cfg.Runtime.MaxBackoff.Duration != time.Minute {
+		t.Errorf("overridden runtime = %+v", cfg.Runtime)
 	}
 }
 

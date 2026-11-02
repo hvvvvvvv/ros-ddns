@@ -93,8 +93,9 @@ func prepareDaemonConfig(absConfigPath string, serviceManaged bool) (*config.Con
 
 // writeDefaultConfig atomically installs the embedded default configuration
 // with mode 0600, creating the parent directory (0700) when necessary. The
-// state path is written as an absolute path below the configuration directory so
-// the first start works from any working directory.
+// state path fallback is written as an absolute path below the configuration
+// directory so the first start works from any working directory, and
+// ROS_DDNS_STATE_PATH can override it at load time.
 func writeDefaultConfig(path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -131,15 +132,17 @@ func writeDefaultConfig(path string) error {
 	return nil
 }
 
-// defaultConfigWithStatePath substitutes the absolute state path into the
-// embedded template. The template keeps a relative placeholder so it stays
-// parseable on its own (see config.TestDefaultConfigYAML).
+// defaultConfigWithStatePath substitutes the absolute state path as the
+// fallback of ROS_DDNS_STATE_PATH in the embedded template. The template keeps
+// state.json as its fallback so it stays parseable on its own (see
+// config.TestDefaultConfigYAML); the generated file names the absolute path and
+// still allows ROS_DDNS_STATE_PATH to override it.
 func defaultConfigWithStatePath(statePath string) ([]byte, error) {
-	marker := []byte("  path: state.json\n")
+	marker := []byte("  path: ${ROS_DDNS_STATE_PATH:-state.json}\n")
 	raw := config.DefaultConfigYAML()
 	if !bytes.Contains(raw, marker) {
 		return nil, fmt.Errorf("default configuration template is missing its state path")
 	}
-	quoted := strconv.Quote(filepath.ToSlash(statePath))
-	return bytes.Replace(raw, marker, []byte("  path: "+quoted+"\n"), 1), nil
+	fallback := "${ROS_DDNS_STATE_PATH:-" + filepath.ToSlash(statePath) + "}"
+	return bytes.Replace(raw, marker, []byte("  path: "+strconv.Quote(fallback)+"\n"), 1), nil
 }

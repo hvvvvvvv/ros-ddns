@@ -100,26 +100,65 @@ func TestEnvExpansionPreservesStrictYAML(t *testing.T) {
 	}
 }
 
-func TestEnvExpandedNumbersAndBooleansStayStrings(t *testing.T) {
-	for _, tc := range []struct{ name, value, input string }{
-		{"boolean", "true", "runtime:\n  syncOnStart: ${ROS_DDNS_TEST_TYPED}\n" + minimalConfig},
-		{"legacy boolean off", "off", "runtime:\n  syncOnStart: ${ROS_DDNS_TEST_TYPED}\n" + minimalConfig},
-		{"legacy boolean YES", "YES", "runtime:\n  syncOnStart: ${ROS_DDNS_TEST_TYPED}\n" + minimalConfig},
-		{"TLS boolean", "on", strings.Replace(minimalConfig, "routeros:", "routeros:\n  tls:\n    insecureSkipVerify: ${ROS_DDNS_TEST_TYPED}", 1)},
-		{"item boolean", "no", strings.Replace(minimalConfig, "name: wan-v6", "name: wan-v6\n    disabled: ${ROS_DDNS_TEST_TYPED}", 1)},
-		{"aliased boolean", "off", strings.Replace(minimalConfig, "password: super-secret", "password: &flag ${ROS_DDNS_TEST_TYPED}", 1) + "\nruntime: {syncOnStart: *flag}\n"},
-		{"merged boolean", "off", "runtime:\n  <<: {syncOnStart: '${ROS_DDNS_TEST_TYPED}'}\n" + minimalConfig},
-		{"integer", "5", strings.Replace(providerConfig, "type: aliyun", "type: aliyun\n      qps: ${ROS_DDNS_TEST_TYPED}", 1)},
-		{"tagged integer", "5", strings.Replace(providerConfig, "type: aliyun", "type: aliyun\n      qps: !!int ${ROS_DDNS_TEST_TYPED}", 1)},
+func TestEnvExpandedBooleanValues(t *testing.T) {
+	const ref = "${ROS_DDNS_TEST_TYPED}"
+	t.Run("syncOnStart true", func(t *testing.T) {
+		t.Setenv("ROS_DDNS_TEST_TYPED", "true")
+		cfg, err := loadString(t, "runtime:\n  syncOnStart: "+ref+"\n"+minimalConfig)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Runtime.SyncOnStart {
+			t.Error("syncOnStart = false, want true")
+		}
+	})
+	t.Run("syncOnStart false", func(t *testing.T) {
+		t.Setenv("ROS_DDNS_TEST_TYPED", "false")
+		cfg, err := loadString(t, "runtime:\n  syncOnStart: "+ref+"\n"+minimalConfig)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Runtime.SyncOnStart {
+			t.Error("syncOnStart = true, want false")
+		}
+	})
+	t.Run("TLS skip verify true", func(t *testing.T) {
+		t.Setenv("ROS_DDNS_TEST_TYPED", "true")
+		input := strings.Replace(minimalConfig, "routeros:", "routeros:\n  tls:\n    insecureSkipVerify: "+ref, 1)
+		cfg, err := loadString(t, input)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.RouterOS.TLS.InsecureSkipVerify {
+			t.Error("insecureSkipVerify = false, want true")
+		}
+	})
+}
+
+func TestEnvExpandedNonBooleanScalarsStayStrings(t *testing.T) {
+	for _, tc := range []struct{ name, value, input, want string }{
+		{"legacy boolean off", "off", "runtime:\n  syncOnStart: ${ROS_DDNS_TEST_TYPED}\n" + minimalConfig,
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
+		{"legacy boolean YES", "YES", "runtime:\n  syncOnStart: ${ROS_DDNS_TEST_TYPED}\n" + minimalConfig,
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
+		{"TLS boolean", "on", strings.Replace(minimalConfig, "routeros:", "routeros:\n  tls:\n    insecureSkipVerify: ${ROS_DDNS_TEST_TYPED}", 1),
+			"routeros.tls.insecureSkipVerify: environment-expanded value must be true or false"},
+		{"item boolean", "no", strings.Replace(minimalConfig, "name: wan-v6", "name: wan-v6\n    disabled: ${ROS_DDNS_TEST_TYPED}", 1),
+			"items[0].disabled: environment-expanded value must be true or false"},
+		{"aliased boolean", "off", strings.Replace(minimalConfig, "password: super-secret", "password: &flag ${ROS_DDNS_TEST_TYPED}", 1) + "\nruntime: {syncOnStart: *flag}\n",
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
+		{"merged boolean", "off", "runtime:\n  <<: {syncOnStart: '${ROS_DDNS_TEST_TYPED}'}\n" + minimalConfig,
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
+		{"integer", "5", strings.Replace(providerConfig, "type: aliyun", "type: aliyun\n      qps: ${ROS_DDNS_TEST_TYPED}", 1),
+			"environment-expanded scalars are strings"},
+		{"tagged integer", "5", strings.Replace(providerConfig, "type: aliyun", "type: aliyun\n      qps: !!int ${ROS_DDNS_TEST_TYPED}", 1),
+			"environment-expanded scalars are strings"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ROS_DDNS_TEST_TYPED", tc.value)
 			_, err := loadString(t, tc.input)
-			if err == nil {
-				t.Fatal("Load coerced an environment-expanded string into a numeric or boolean field")
-			}
-			if !strings.Contains(err.Error(), "environment-expanded scalars are strings") {
-				t.Errorf("error omits guidance on expanded types: %v", err)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
 			}
 		})
 	}
@@ -215,7 +254,7 @@ func TestEnvErrorsPreserveFieldDetails(t *testing.T) {
 				{"log level", "log:\n  level: verbose\n" + input,
 					"invalid config:\n - log.level: unsupported value \"verbose\" (debug|info|warn|error)"},
 				{"unknown field", "log:\n  levle: info\n" + input,
-					"parse YAML: yaml: unmarshal errors:\n  line 2: field levle not found in type config.LogConfig; environment-expanded scalars are strings (use YAML literals for numbers and booleans)"},
+					"parse YAML: yaml: unmarshal errors:\n  line 2: field levle not found in type config.LogConfig; environment-expanded scalars are strings (use YAML literals for numbers; booleans must expand to true or false)"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					_, err := Parse([]byte(tc.input), "test.yaml")
@@ -268,12 +307,12 @@ func TestEnvErrorsRedactRepresentations(t *testing.T) {
 			`domain: invalid domain "[redacted]"`},
 		{"raw item label", " LeakProbe\nName ", strings.Replace(minimalConfig, "name: wan-v6", "name: "+ref, 1),
 			`items[0] ([redacted]).name: "[redacted]" must match`},
-		{"short boolean", "true", "runtime:\n  syncOnStart: " + ref + "\n" + minimalConfig,
-			"cannot unmarshal !!str `[redacted]` into bool"},
+		{"short boolean", "tru", "runtime:\n  syncOnStart: " + ref + "\n" + minimalConfig,
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
 		{"boolean preview", "LeakProbe-LongSecret", "runtime:\n  syncOnStart: " + ref + "\n" + minimalConfig,
-			"cannot unmarshal !!str `[redacted]` into bool"},
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
 		{"UTF-8 preview", "秘密密码LeakProbe", "runtime:\n  syncOnStart: " + ref + "\n" + minimalConfig,
-			"cannot unmarshal !!str `[redacted]` into bool"},
+			"runtime.syncOnStart: environment-expanded value must be true or false"},
 		{"numeric string", "42", strings.Replace(providerConfig, "rr: Home", "rr: Home\n        ttl: "+ref, 1),
 			"cannot unmarshal !!str `[redacted]` into int"},
 		{"numeric preview", "LeakProbe-LongSecret", strings.Replace(providerConfig, "rr: Home", "rr: Home\n        ttl: "+ref, 1),

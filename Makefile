@@ -44,8 +44,9 @@ fmt:
 
 check: fmt vet test
 
+# First run generates build/configs/config.local.yaml from the embedded default.
 run: build
-	$(BIN) -config configs/config.example.yaml
+	$(BIN) -config build/configs/config.local.yaml
 
 # All non-source artifacts live under build/. Never blanket-delete build/: it
 # also holds local config, runtime state, logs and credentials.

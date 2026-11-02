@@ -121,12 +121,56 @@ func (r *scalarReference) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// rejectExpandedBooleans closes yaml.v3's legacy string-to-bool coercion for
-// on/off/yes/no. Let the decoder resolve merges and overrides, and only reject
-// effective boolean fields whose scalar was expanded. Literal values keep their
-// existing decoding behavior. The full config has already passed KnownFields.
-func rejectExpandedBooleans(document *yaml.Node, expanded map[*yaml.Node]bool) error {
-	if len(expanded) == 0 {
+// normalizeExpandedBooleans accepts environment-expanded scalars for the
+// direct boolean fields of this schema when they expand to true or false, and
+// retags those nodes so YAML decoding produces a bool. Values expanded through
+// aliases or merge keys are intentionally left alone: those paths keep the
+// strict string behavior and are rejected by the decoder.
+func normalizeExpandedBooleans(document *yaml.Node, expanded map[*yaml.Node]bool) error {
+	if len(expanded) == 0 || document == nil || len(document.Content) == 0 {
+		return nil
+	}
+	root := document.Content[0]
+	normalize := func(name string, node *yaml.Node) error {
+		if node == nil || node.Kind != yaml.ScalarNode || !expanded[node] {
+			return nil
+		}
+		value := strings.ToLower(strings.TrimSpace(node.Value))
+		if value != "true" && value != "false" {
+			return fmt.Errorf("%s: environment-expanded value must be true or false", name)
+		}
+		node.Value = value
+		node.Tag = "!!bool"
+		node.Style = 0
+		return nil
+	}
+	if runtime := mappingValue(root, "runtime"); runtime != nil {
+		if err := normalize("runtime.syncOnStart", mappingValue(runtime, "syncOnStart")); err != nil {
+			return err
+		}
+	}
+	if routerOS := mappingValue(root, "routeros"); routerOS != nil {
+		if tls := mappingValue(routerOS, "tls"); tls != nil {
+			if err := normalize("routeros.tls.insecureSkipVerify", mappingValue(tls, "insecureSkipVerify")); err != nil {
+				return err
+			}
+		}
+	}
+	if items := mappingValue(root, "items"); items != nil && items.Kind == yaml.SequenceNode {
+		for i, item := range items.Content {
+			if err := normalize(fmt.Sprintf("items[%d].disabled", i), mappingValue(item, "disabled")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateExpandedBooleanValues rejects effective boolean fields whose
+// environment-expanded value is not true or false. It runs after decoding
+// because aliases and merge keys resolve to their effective scalar only then.
+func validateExpandedBooleanValues(document *yaml.Node, expanded map[*yaml.Node]bool) error {
+	if len(expanded) == 0 || document == nil {
 		return nil
 	}
 	var fields struct {
@@ -146,8 +190,12 @@ func rejectExpandedBooleans(document *yaml.Node, expanded map[*yaml.Node]bool) e
 		return fmt.Errorf("parse YAML: cannot validate environment-expanded boolean fields")
 	}
 	check := func(name string, ref scalarReference) error {
-		if expanded[ref.node] {
-			return fmt.Errorf("%s: environment-expanded scalars are strings; use a YAML boolean literal", name)
+		if ref.node == nil || !expanded[ref.node] {
+			return nil
+		}
+		value := strings.ToLower(strings.TrimSpace(ref.node.Value))
+		if value != "true" && value != "false" {
+			return fmt.Errorf("%s: environment-expanded value must be true or false", name)
 		}
 		return nil
 	}
@@ -160,6 +208,20 @@ func rejectExpandedBooleans(document *yaml.Node, expanded map[*yaml.Node]bool) e
 	for i, item := range fields.Items {
 		if err := check(fmt.Sprintf("items[%d].disabled", i), item.Disabled); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// mappingValue returns the value node for key in a direct mapping, following
+// no aliases or merge keys.
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
 		}
 	}
 	return nil

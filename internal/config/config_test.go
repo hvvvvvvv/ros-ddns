@@ -267,40 +267,6 @@ func TestNoItemsRejected(t *testing.T) {
 	}
 }
 
-func TestExampleConfig(t *testing.T) {
-	t.Setenv("ROS_PASSWORD", "test-password")
-	t.Setenv("ALI_ACCESS_KEY_ID", "test-access-key-id")
-	t.Setenv("ALI_ACCESS_KEY_SECRET", "test-access-key-secret")
-	t.Setenv("ROS_DDNS_API_TOKEN", "")
-
-	cfg, err := Load(filepath.Join("..", "..", "configs", "config.example.yaml"))
-	if err != nil {
-		t.Fatalf("Load example: %v", err)
-	}
-	if got, want := len(cfg.Items), 2; got != want {
-		t.Fatalf("items = %d, want %d", got, want)
-	}
-	if cfg.Items[0].Source.Family != FamilyIPv4 || cfg.Items[1].Source.Family != FamilyIPv6 {
-		t.Fatalf("unexpected item families: %q, %q", cfg.Items[0].Source.Family, cfg.Items[1].Source.Family)
-	}
-	if cfg.Items[1].Source.EUI64MACAddr == nil {
-		t.Fatal("example ipv6 item MAC was not parsed")
-	}
-	if got, want := cfg.Items[1].Domains[0].FQDN(), "home.example.com"; got != want {
-		t.Errorf("fqdn = %q, want %q", got, want)
-	}
-	if got, want := cfg.Items[1].AddressList.List, "ddns-home-ipv6"; got != want {
-		t.Errorf("address list = %q, want %q", got, want)
-	}
-
-	summary := Summary(cfg)
-	for _, secret := range []string{"test-password", "test-access-key-id", "test-access-key-secret"} {
-		if strings.Contains(summary, secret) {
-			t.Errorf("summary leaks secret %q", secret)
-		}
-	}
-}
-
 func TestAPITokenRequiredForNonLoopback(t *testing.T) {
 	_, err := loadString(t, "api:\n  listen: 0.0.0.0:8080\n"+minimalConfig)
 	if err == nil || !strings.Contains(err.Error(), "api.token") {

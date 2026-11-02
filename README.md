@@ -25,29 +25,31 @@
 ### Docker Compose
 
 ```bash
-cp deploy/docker/config.example.yaml data/config.yaml
+mkdir -p data
+sudo chown 10001:10001 data   # 容器以该用户写入 data/
 cp .env.example .env
-chmod 600 .env data/config.yaml
-# 编辑 .env 与 data/config.yaml：凭据、RouterOS 地址、接口和域名
+chmod 600 .env
+# 编辑 .env：凭据、API token、ROS_DDNS_LISTEN=0.0.0.0:8080；
+# 容器首次启动会据此生成 data/config.yaml，接口/域名等可在 WebUI 完成
 docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:8080/>，用 WebUI 查看状态、继续配置。Linux 下容器以 `10001` 用户运行，如无法写入 `data/`，执行 `sudo chown -R 10001:10001 data`。
+打开 <http://127.0.0.1:8080/>，用 WebUI 查看状态、继续配置。Linux 下容器以 `10001` 用户运行，`data/` 必须允许该用户写入：`sudo chown 10001:10001 data`。首次启动生成的 `data/config.yaml` 属主同样是 `10001`。
 
 ### 从源码运行
 
 需要 Go 1.26.2 或更高版本。
 
 ```bash
-cp configs/config.example.yaml config.yaml
+# 可选：启动前用环境变量覆盖默认配置模板中的值
 export ROS_PASSWORD='路由器密码'
 export ALI_ACCESS_KEY_ID='AccessKey ID'
 export ALI_ACCESS_KEY_SECRET='AccessKey Secret'
 export ROS_DDNS_API_TOKEN='一段随机长 token'
 
-go run ./cmd/ros-ddns -config config.yaml -check   # 校验配置
 go build -o ros-ddns ./cmd/ros-ddns
-./ros-ddns -config config.yaml                     # 前台运行，Ctrl+C 停止
+./ros-ddns -config config.yaml                     # 首次启动生成 config.yaml，前台运行
+./ros-ddns -config config.yaml -check              # 生成后静态校验（可在另一终端）
 ```
 
 Windows PowerShell：
@@ -58,12 +60,12 @@ $env:ALI_ACCESS_KEY_ID = 'AccessKey ID'
 $env:ALI_ACCESS_KEY_SECRET = 'AccessKey Secret'
 $env:ROS_DDNS_API_TOKEN = '一段随机长 token'
 
-.\scripts\go.cmd run ./cmd/ros-ddns -config config.yaml -check
 .\scripts\go.cmd build -o build\bin\ros-ddns.exe ./cmd/ros-ddns
-.\build\bin\ros-ddns.exe -config config.yaml
+.\build\bin\ros-ddns.exe -config config.yaml        # 首次启动生成 config.yaml
+.\build\bin\ros-ddns.exe -config config.yaml -check # 生成后静态校验
 ```
 
-程序不会自动加载 `.env` 文件；凭据也可以直接写进配置文件（建议 `0600` 权限）。配置文件不存在时，程序会生成一份默认配置并启动 WebUI，可直接在界面里完成设置。
+程序不会自动加载 `.env` 文件。配置文件不存在时，首次守护进程启动会生成内嵌默认配置并启动 WebUI；模板中的字符串字段都带 `${VAR:-默认值}` 引用，可用环境变量覆盖，也可以直接编辑生成的文件（建议 `0600` 权限）或在 WebUI 完成设置。默认监听 `127.0.0.1:8080`。
 
 ## WebUI
 
@@ -75,7 +77,7 @@ $env:ROS_DDNS_API_TOKEN = '一段随机长 token'
 
 ## 配置
 
-示例配置：[configs/config.example.yaml](configs/config.example.yaml)。完整字段说明见 [配置参考](docs/configuration.md)。
+默认配置在首次守护进程启动时生成（内嵌模板见 [internal/config/default.yaml](internal/config/default.yaml)）。默认 `routeros.tls.insecureSkipVerify: false`；自签名路由器需改为 `true` 或提供 `caFile`。完整字段说明见 [配置参考](docs/configuration.md)。
 
 | 配置段 | 说明 |
 | --- | --- |
@@ -87,7 +89,7 @@ $env:ROS_DDNS_API_TOKEN = '一段随机长 token'
 | `dns` | 阿里云解析 provider 与凭据 |
 | `items` | 同步项：来源接口、域名、`address-list` |
 
-凭据字段支持 `${VAR}` 形式的环境变量引用（在 YAML 解析后展开）。
+配置字段支持 `${VAR}` / `${VAR:-默认值}` 环境变量引用（YAML 解析后展开）。默认模板的 `log`、`runtime`、`state`、`api` 各字段都可用环境变量覆盖，例如 `ROS_DDNS_LOG_LEVEL`、`ROS_DDNS_POLL_INTERVAL`、`ROS_DDNS_SYNC_ON_START`、`ROS_DDNS_STATE_PATH`；其余覆盖项包括 `ROS_DDNS_LISTEN`、`ROS_DDNS_ROUTEROS_URL`、`ROS_DDNS_INTERFACE`、`ROS_DDNS_DOMAIN` 等，详见 [配置参考](docs/configuration.md#2-环境变量展开)。
 
 ## 命令行
 

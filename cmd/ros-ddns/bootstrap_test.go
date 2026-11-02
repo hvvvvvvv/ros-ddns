@@ -8,11 +8,55 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"ros-ddns/internal/config"
 )
 
+func clearDefaultConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"ROS_DDNS_LISTEN",
+		"ROS_DDNS_API_TOKEN",
+		"ROS_DDNS_ROUTEROS_URL",
+		"ROS_DDNS_ROUTEROS_USERNAME",
+		"ROS_PASSWORD",
+		"ROS_DDNS_CA_FILE",
+		"ALI_ACCESS_KEY_ID",
+		"ALI_ACCESS_KEY_SECRET",
+		"ALI_SECURITY_TOKEN",
+		"ROS_DDNS_INTERFACE",
+		"ROS_DDNS_DOMAIN",
+		"ROS_DDNS_LOG_LEVEL",
+		"ROS_DDNS_LOG_FORMAT",
+		"ROS_DDNS_POLL_INTERVAL",
+		"ROS_DDNS_STABLE_FOR",
+		"ROS_DDNS_RECONCILE_TIMEOUT",
+		"ROS_DDNS_VERIFY_INTERVAL",
+		"ROS_DDNS_SYNC_ON_START",
+		"ROS_DDNS_MAX_BACKOFF",
+		"ROS_DDNS_STATE_PATH",
+	} {
+		value, wasSet := os.LookupEnv(name)
+		t.Cleanup(func() {
+			var err error
+			if wasSet {
+				err = os.Setenv(name, value)
+			} else {
+				err = os.Unsetenv(name)
+			}
+			if err != nil {
+				t.Errorf("restore environment variable %s: %v", name, err)
+			}
+		})
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset environment variable %s: %v", name, err)
+		}
+	}
+}
+
 func TestRecoverConfigCreatesDefault(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "nested")
 	path := filepath.Join(dir, "config.yaml")
 	recovery, err := recoverConfig(path, errors.New("read config: file does not exist"))
@@ -31,6 +75,11 @@ func TestRecoverConfigCreatesDefault(t *testing.T) {
 	}
 	if bytes.Equal(raw, config.DefaultConfigYAML()) {
 		t.Fatal("generated configuration should contain an absolute state path")
+	}
+	for _, marker := range []string{"${ROS_DDNS_LOG_LEVEL:-info}", "${ROS_DDNS_SYNC_ON_START:-true}", "${ROS_DDNS_STATE_PATH:-"} {
+		if !bytes.Contains(raw, []byte(marker)) {
+			t.Fatalf("generated configuration is missing %q", marker)
+		}
 	}
 	cfg, err := config.Parse(raw, path)
 	if err != nil {
@@ -51,7 +100,28 @@ func TestRecoverConfigCreatesDefault(t *testing.T) {
 	}
 }
 
+func TestGeneratedStatePathEnvOverride(t *testing.T) {
+	clearDefaultConfigEnv(t)
+	t.Setenv("ROS_DDNS_STATE_PATH", "custom/state.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if _, err := recoverConfig(path, errors.New("read config: file does not exist")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load generated configuration: %v", err)
+	}
+	if cfg.State.Path != "custom/state.json" {
+		t.Fatalf("state.path = %q, want custom/state.json", cfg.State.Path)
+	}
+	if cfg.Log.Level != "info" || cfg.Runtime.PollInterval.Duration != 10*time.Second {
+		t.Fatalf("defaults were not applied: log=%q poll=%s", cfg.Log.Level, cfg.Runtime.PollInterval)
+	}
+}
+
 func TestRecoverConfigQuarantinesUnloadableFile(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	original := []byte("routeros: [\n")
@@ -95,6 +165,7 @@ func TestRecoverConfigRejectsDirectory(t *testing.T) {
 }
 
 func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	original, err := os.Getwd()
@@ -123,6 +194,7 @@ func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
 }
 
 func TestPrepareDaemonConfigServiceModeChangesWorkingDirectory(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	original, err := os.Getwd()
@@ -167,6 +239,7 @@ func TestPrepareDaemonConfigInteractiveRejectsInvalidConfiguration(t *testing.T)
 }
 
 func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {

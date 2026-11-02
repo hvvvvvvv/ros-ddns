@@ -9,7 +9,7 @@
 
     Files used by this script:
       build\bin\ros-ddns.exe           binary (use -Build or the go wrapper)
-      build\configs\config.local.yaml  local config, copied from configs\config.example.yaml
+      build\configs\config.local.yaml  local config, generated on first start (optional env overrides)
       build\secrets\ros-ddns.env       KEY=VALUE credentials, never printed
       build\data\test-state.json       runtime state plus its .lock
       build\logs\                      daemon stdout/stderr logs

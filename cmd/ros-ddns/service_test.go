@@ -261,6 +261,7 @@ func TestServiceProgramStopWithoutStart(t *testing.T) {
 }
 
 func TestRecoveryFileIsLoadableByMainConfigLoad(t *testing.T) {
+	clearDefaultConfigEnv(t)
 	// A generated default must load from any working directory because its state
 	// path is written as an absolute path.
 	path := filepath.Join(t.TempDir(), "config.yaml")

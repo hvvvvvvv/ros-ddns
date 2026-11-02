@@ -1,40 +1,42 @@
 # Default ros-ddns configuration, written on a daemon start when the configured
 # file does not exist (or when a service-managed start cannot load it).
 #
-# The placeholder RouterOS and Aliyun credentials below are empty on purpose:
-# the daemon starts, logs synchronization errors and retries, and the WebUI is
-# available for completing the configuration. Replace the placeholders either
-# in this file (mode 0600) or in the WebUI, then restart if needed.
+# Every environment reference below has a default, so a service manager without
+# a shell environment still loads this file. Copy/edit it or use the WebUI;
+# Docker Compose can override the values through its env_file.
 log:
-  level: info
-  format: text
+  level: ${ROS_DDNS_LOG_LEVEL:-info}
+  format: ${ROS_DDNS_LOG_FORMAT:-text}
 
 runtime:
-  pollInterval: 10s
-  stableFor: 0s
-  reconcileTimeout: 30s
-  verifyInterval: 10m
-  syncOnStart: true
-  maxBackoff: 5m
+  pollInterval: ${ROS_DDNS_POLL_INTERVAL:-10s}
+  stableFor: ${ROS_DDNS_STABLE_FOR:-0s}
+  reconcileTimeout: ${ROS_DDNS_RECONCILE_TIMEOUT:-30s}
+  verifyInterval: ${ROS_DDNS_VERIFY_INTERVAL:-10m}
+  syncOnStart: ${ROS_DDNS_SYNC_ON_START:-true}
+  maxBackoff: ${ROS_DDNS_MAX_BACKOFF:-5m}
 
 state:
-  # The generated file replaces this placeholder with an absolute path below the
-  # configuration directory, so the first start works from any working directory.
-  path: state.json
+  # The generated file replaces the fallback below with an absolute path under
+  # the configuration directory; ROS_DDNS_STATE_PATH can override it.
+  path: ${ROS_DDNS_STATE_PATH:-state.json}
 
 api:
-  # Keep the default loopback binding for the first start; changing api.listen,
-  # api.token or log.format requires a service restart.
-  listen: 127.0.0.1:8080
-  token: ""
+  # Loopback by default. A container should set ROS_DDNS_LISTEN=0.0.0.0:8080 and
+  # a non-empty ROS_DDNS_API_TOKEN; api.listen/token/log.format changes need a restart.
+  listen: ${ROS_DDNS_LISTEN:-127.0.0.1:8080}
+  token: ${ROS_DDNS_API_TOKEN:-}
 
 routeros:
-  url: https://192.168.88.1
-  username: admin
-  password: ""
+  url: ${ROS_DDNS_ROUTEROS_URL:-https://192.168.88.1}
+  username: ${ROS_DDNS_ROUTEROS_USERNAME:-admin}
+  password: ${ROS_PASSWORD:-}
   timeout: 10s
   tls:
-    insecureSkipVerify: true
+    # Enable this only for a self-signed router, or set caFile to a trusted PEM.
+    # If referenced from the environment, the expanded value must be true/false.
+    insecureSkipVerify: false
+    caFile: ${ROS_DDNS_CA_FILE:-}
 
 dns:
   providers:
@@ -42,24 +44,25 @@ dns:
       type: aliyun
       endpoint: alidns.aliyuncs.com
       regionId: cn-hangzhou
-      accessKeyId: ""
-      accessKeySecret: ""
+      accessKeyId: ${ALI_ACCESS_KEY_ID:-}
+      accessKeySecret: ${ALI_ACCESS_KEY_SECRET:-}
+      securityToken: ${ALI_SECURITY_TOKEN:-}
       timeout: 10s
       qps: 5
 
 items:
-  # Placeholder item: replace the interface, domain and credentials. Failures
-  # are reported in the log and the in-app notifications, and retried.
+  # Placeholder item: override the interface/domain from the environment or the
+  # WebUI. Failures are reported in the log and in-app notifications, and retried.
   - name: home-ipv4
     source:
-      interface: pppoe-out1
+      interface: ${ROS_DDNS_INTERFACE:-pppoe-out1}
       family: ipv4
       select:
         scope: public
         index: 0
     domains:
       - provider: ali-main
-        domain: example.com
+        domain: ${ROS_DDNS_DOMAIN:-example.com}
         rr: home
         ttl: 600
         line: default

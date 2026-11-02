@@ -1,6 +1,6 @@
 # 配置参考
 
-本页对应最终配置加载器与校验代码，完整双栈示例见 [`configs/config.example.yaml`](../configs/config.example.yaml)。CLI 用法见 [README](../README.md#cli-合同)。
+本页对应最终配置加载器与校验代码。默认配置由守护进程首次启动时生成（内嵌模板为 `internal/config/default.yaml`，字符串字段都带默认值的环境引用）；字段说明如下，CLI 用法见 [README](../README.md#cli-合同)。
 
 ## 1. 解析与默认值
 
@@ -38,9 +38,11 @@ api:
 
 以上是片段。环境值中的空格、`#`、`: `、引号、反斜杠和换行会保留在字符串中，不会注入新的 YAML 字段；不必为了这些内容手动做 YAML 转义。不过字段规范化仍会处理指定字段的首尾空白，例如 `api.token` 会 trim，而 RouterOS 密码、AccessKey ID / Secret、STS token 保留原值。
 
-数字与布尔字段必须写 YAML 字面量，例如 `qps: 5`、`ttl: 600`、`syncOnStart: true`；不能用 `${QPS}` 或 `${SYNC_ON_START}` 让字符串自动转型，显式 YAML 类型标签也不能改变展开结果。duration 本身是字符串，可以通过环境变量提供。
+数字字段必须写 YAML 字面量，例如 `qps: 5`、`ttl: 600`；不能用 `${QPS}` 让字符串自动转型。布尔字段可写 YAML 字面量（`true` / `false` 及 YAML 兼容写法），也可写环境引用，但展开值只能是 `true` 或 `false`（例如 `syncOnStart: ${ROS_DDNS_SYNC_ON_START:-true}`）；显式 YAML 类型标签也不能改变展开结果。duration 本身是字符串，可以通过环境变量提供。
 
 展开、解码和语义校验错误会清洗已展开值及相关诊断表示，尽量保留字段位置和错误原因。程序不自动读取 `.env`；环境变量由 shell、服务管理器或部署系统传入。以 OS 服务方式运行时进程不继承 shell 环境：含无默认值 `${VAR}` 的配置在服务启动时会加载失败（原文件会被保留为 `.invalid-<时间戳>`），应使用字面值或在 WebUI 中配置；开启 `-service` 前也建议先用 `-check` 配合相同环境验证。
+
+默认配置模板（首次启动生成）使用下列可选变量，都带默认值，未设置时不会阻止启动：`log` 段 `ROS_DDNS_LOG_LEVEL`、`ROS_DDNS_LOG_FORMAT`；`runtime` 段 `ROS_DDNS_POLL_INTERVAL`、`ROS_DDNS_STABLE_FOR`、`ROS_DDNS_RECONCILE_TIMEOUT`、`ROS_DDNS_VERIFY_INTERVAL`、`ROS_DDNS_SYNC_ON_START`、`ROS_DDNS_MAX_BACKOFF`；`state` 段 `ROS_DDNS_STATE_PATH`；`api` 段 `ROS_DDNS_LISTEN`、`ROS_DDNS_API_TOKEN`；以及 `ROS_DDNS_ROUTEROS_URL`、`ROS_DDNS_ROUTEROS_USERNAME`、`ROS_PASSWORD`、`ROS_DDNS_CA_FILE`、`ALI_ACCESS_KEY_ID`、`ALI_ACCESS_KEY_SECRET`、`ALI_SECURITY_TOKEN`、`ROS_DDNS_INTERFACE`、`ROS_DDNS_DOMAIN`。生成文件会把 `state.path` 写成 `${ROS_DDNS_STATE_PATH:-<配置目录下的绝对路径>}`；TLS `insecureSkipVerify` 默认是 YAML 字面量 `false`，自签名路由器需在 YAML / WebUI 中改为 `true` 或提供 `caFile`（如改成环境引用，展开值必须是 `true` / `false`）。
 
 ## 3. 完整字段参考
 

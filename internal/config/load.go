@@ -23,7 +23,8 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse parses configuration bytes before expanding scalar values. Expanded
-// scalars are strings; numeric and boolean fields must use YAML literals.
+// scalars are strings; numeric fields must use YAML literals, while direct
+// boolean fields accept environment-expanded true/false values.
 // It then applies defaults and validation. The path is used for Config.Path.
 func Parse(data []byte, path string) (*Config, error) {
 	var document yaml.Node
@@ -45,6 +46,9 @@ func Parse(data []byte, path string) (*Config, error) {
 	if err != nil {
 		return nil, redactEnvError(err, values)
 	}
+	if err := normalizeExpandedBooleans(&document, changed); err != nil {
+		return nil, redactEnvError(err, values)
+	}
 	expanded, err := yaml.Marshal(&document)
 	if err != nil {
 		return nil, redactEnvError(fmt.Errorf("encode YAML: %w", err), values)
@@ -55,11 +59,11 @@ func Parse(data []byte, path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		if len(changed) > 0 {
-			err = fmt.Errorf("%w; environment-expanded scalars are strings (use YAML literals for numbers and booleans)", err)
+			err = fmt.Errorf("%w; environment-expanded scalars are strings (use YAML literals for numbers; booleans must expand to true or false)", err)
 		}
 		return nil, redactEnvError(fmt.Errorf("parse YAML: %w", err), values)
 	}
-	if err := rejectExpandedBooleans(&document, changed); err != nil {
+	if err := validateExpandedBooleanValues(&document, changed); err != nil {
 		return nil, redactEnvError(err, values)
 	}
 	cfg.Path = path
