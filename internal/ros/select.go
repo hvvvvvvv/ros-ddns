@@ -50,11 +50,7 @@ func selectAddress(addrs []Address, opts SelectOptions) (Selection, error) {
 	if opts.Index < 0 || opts.Index >= len(eligible) {
 		return Selection{}, fmt.Errorf("%w: index %d out of range for %d candidate(s)", ErrNoEligibleAddress, opts.Index, len(eligible))
 	}
-	candidates := make([]netip.Addr, len(eligible))
-	for i, address := range eligible {
-		candidates[i] = address.Prefix.Addr()
-	}
-	return Selection{Address: eligible[opts.Index], Candidates: candidates}, nil
+	return Selection{Address: eligible[opts.Index]}, nil
 }
 
 func addressInScope(address Address, scope string) bool {

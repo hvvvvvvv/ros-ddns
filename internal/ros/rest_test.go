@@ -77,28 +77,28 @@ func TestRESTClientAddresses(t *testing.T) {
 		{
 			name: "IPv4 with normalized base path", family: IPv4,
 			basePath: "/gateway//router///", path: "/gateway/router/rest/ip/address",
-			properties: ".id,address,interface,actual-interface,dynamic,disabled,invalid",
+			properties: ".id,address,interface,actual-interface,disabled,invalid",
 			body: `[
 				{".id":"*1","address":"203.0.113.23/24","interface":"pppoe-out1","actual-interface":"ether1","dynamic":"yes","disabled":"false","invalid":"no"},
 				{".id":"*2","address":"192.168.1.7/24","interface":"bridge","dynamic":"no","disabled":"true","invalid":"yes"}
 			]`,
 			want: []Address{
-				{ID: "*1", Prefix: netip.MustParsePrefix("203.0.113.23/24"), Interface: "pppoe-out1", ActualInterface: "ether1", Dynamic: true},
-				{ID: "*2", Prefix: netip.MustParsePrefix("192.168.1.7/24"), Interface: "bridge", Disabled: true, Invalid: true},
+				{Prefix: netip.MustParsePrefix("203.0.113.23/24"), Interface: "pppoe-out1", ActualInterface: "ether1"},
+				{Prefix: netip.MustParsePrefix("192.168.1.7/24"), Interface: "bridge", Disabled: true, Invalid: true},
 			},
 		},
 		{
 			name: "IPv6 flags", family: IPv6, basePath: "/", path: "/rest/ipv6/address",
-			properties: ".id,address,interface,actual-interface,dynamic,disabled,invalid,global,link-local,deprecated",
+			properties: ".id,address,interface,actual-interface,disabled,invalid,global,link-local,deprecated",
 			body: `[
 				{".id":"*A","address":"2001:db8:1::42/64","interface":"pppoe-out1","actual-interface":"ether1","dynamic":"true","disabled":"no","invalid":"","global":"yes","link-local":"false","deprecated":"no"},
 				{".id":"*B","address":"fe80::1234/64","interface":"ether1","dynamic":"false","global":"no","link-local":"yes","deprecated":"true"},
 				{".id":"*C","address":"fd00::7/64","interface":"bridge","global":" TRUE ","deprecated":"YES"}
 			]`,
 			want: []Address{
-				{ID: "*A", Prefix: netip.MustParsePrefix("2001:db8:1::42/64"), Interface: "pppoe-out1", ActualInterface: "ether1", Dynamic: true, Global: true},
-				{ID: "*B", Prefix: netip.MustParsePrefix("fe80::1234/64"), Interface: "ether1", LinkLocal: true, Deprecated: true},
-				{ID: "*C", Prefix: netip.MustParsePrefix("fd00::7/64"), Interface: "bridge", Global: true, Deprecated: true},
+				{Prefix: netip.MustParsePrefix("2001:db8:1::42/64"), Interface: "pppoe-out1", ActualInterface: "ether1", Global: true},
+				{Prefix: netip.MustParsePrefix("fe80::1234/64"), Interface: "ether1", LinkLocal: true, Deprecated: true},
+				{Prefix: netip.MustParsePrefix("fd00::7/64"), Interface: "bridge", Global: true, Deprecated: true},
 			},
 		},
 	} {
@@ -358,13 +358,13 @@ func TestRESTClientAPIErrors(t *testing.T) {
 		body   string
 		want   APIError
 	}{
-		{"unauthorized", 401, `{"error":401,"message":"Unauthorized","detail":"bad credentials"}`, APIError{401, "401", "Unauthorized", "bad credentials"}},
-		{"forbidden", 403, `{"error":403,"message":"Forbidden","detail":"policy denied"}`, APIError{403, "403", "Forbidden", "policy denied"}},
-		{"string code", 400, `{"error":"INVALID","message":"Bad Request","detail":"invalid list"}`, APIError{400, "INVALID", "Bad Request", "invalid list"}},
-		{"HTTP and body codes differ", 502, `{"error":500,"message":"Router failed"}`, APIError{502, "500", "Router failed", ""}},
-		{"plain text", 502, " upstream failed\n", APIError{502, "", "Bad Gateway", "upstream failed"}},
-		{"empty body", 404, "", APIError{404, "", "Not Found", ""}},
-		{"detail only", 500, `{"detail":"router error"}`, APIError{500, "", "Internal Server Error", "router error"}},
+		{"unauthorized", 401, `{"error":401,"message":"Unauthorized","detail":"bad credentials"}`, APIError{StatusCode: 401, Message: "Unauthorized", Detail: "bad credentials"}},
+		{"forbidden", 403, `{"error":403,"message":"Forbidden","detail":"policy denied"}`, APIError{StatusCode: 403, Message: "Forbidden", Detail: "policy denied"}},
+		{"string code", 400, `{"error":"INVALID","message":"Bad Request","detail":"invalid list"}`, APIError{StatusCode: 400, Message: "Bad Request", Detail: "invalid list"}},
+		{"HTTP and body codes differ", 502, `{"error":500,"message":"Router failed"}`, APIError{StatusCode: 502, Message: "Router failed"}},
+		{"plain text", 502, " upstream failed\n", APIError{StatusCode: 502, Message: "Bad Gateway", Detail: "upstream failed"}},
+		{"empty body", 404, "", APIError{StatusCode: 404, Message: "Not Found"}},
+		{"detail only", 500, `{"detail":"router error"}`, APIError{StatusCode: 500, Message: "Internal Server Error", Detail: "router error"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +399,7 @@ func TestRESTClientAPIErrors(t *testing.T) {
 func TestRESTClientTLS(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		checkRESTRequest(t, r, http.MethodGet, "/rest/ip/address", url.Values{
-			".proplist": {".id,address,interface,actual-interface,dynamic,disabled,invalid"},
+			".proplist": {".id,address,interface,actual-interface,disabled,invalid"},
 		})
 		_, _ = io.WriteString(w, "[]")
 	}))

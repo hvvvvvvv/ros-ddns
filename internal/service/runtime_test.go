@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -347,7 +346,7 @@ func TestBackoffBounds(t *testing.T) {
 		}
 		for range 100 {
 			if jittered := jitterBackoff(delay, 30*time.Second); jittered < delay || jittered > min(delay+delay/10, 30*time.Second) {
-				t.Fatal(fmt.Sprintf("jitter out of bounds: %v", jittered))
+				t.Fatalf("jitter out of bounds: %v", jittered)
 			}
 		}
 	}

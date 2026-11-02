@@ -58,7 +58,7 @@ func TestSelectScopes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			address := Address{
-				ID: "*1", Interface: "wan", Prefix: netip.MustParsePrefix(tc.prefix),
+				Interface: "wan", Prefix: netip.MustParsePrefix(tc.prefix),
 				Global: tc.global, LinkLocal: tc.linkLocal, Deprecated: tc.deprecated,
 			}
 			for _, scope := range []struct {
@@ -76,7 +76,7 @@ func TestSelectScopes(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Select: %v", err)
 					}
-					if got.Address != address || !reflect.DeepEqual(got.Candidates, []netip.Addr{address.Prefix.Addr()}) {
+					if got.Address != address {
 						t.Errorf("Select = %+v, want address %+v", got, address)
 					}
 				})
@@ -120,38 +120,31 @@ func TestSelectInterfaceAndFlags(t *testing.T) {
 
 func TestSelectPrefixSortIndexAndNoMutation(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		prefix   string
-		input    []string
-		want     []string
-		selected int
+		name   string
+		prefix string
+		input  []string
+		want   []int
 	}{
-		{"IPv4 numeric order", "203.0.113.0/24", []string{"203.0.113.100/24", "198.51.100.5/24", "203.0.113.10/24", "203.0.113.2/24"}, []string{"203.0.113.2", "203.0.113.10", "203.0.113.100"}, 2},
-		{"IPv6 numeric order", "2001:db8:1::/64", []string{"2001:db8:1::100/64", "2001:db8:2::2/64", "2001:db8:1::10/64", "2001:db8:1::2/64"}, []string{"2001:db8:1::2", "2001:db8:1::10", "2001:db8:1::100"}, 2},
-		{"IPv4 host prefix", "203.0.113.42/32", []string{"203.0.113.41/24", "203.0.113.42/24"}, []string{"203.0.113.42"}, 1},
-		{"IPv6 host prefix", "2001:db8::42/128", []string{"2001:db8::41/64", "2001:db8::42/64"}, []string{"2001:db8::42"}, 1},
+		{"IPv4 numeric order", "203.0.113.0/24", []string{"203.0.113.100/24", "198.51.100.5/24", "203.0.113.10/24", "203.0.113.2/24"}, []int{3, 2, 0}},
+		{"IPv6 numeric order", "2001:db8:1::/64", []string{"2001:db8:1::100/64", "2001:db8:2::2/64", "2001:db8:1::10/64", "2001:db8:1::2/64"}, []int{3, 2, 0}},
+		{"IPv4 host prefix", "203.0.113.42/32", []string{"203.0.113.41/24", "203.0.113.42/24"}, []int{1}},
+		{"IPv6 host prefix", "2001:db8::42/128", []string{"2001:db8::41/64", "2001:db8::42/64"}, []int{1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			addrs := make([]Address, len(tc.input))
 			for i, prefix := range tc.input {
-				addrs[i] = Address{ID: prefix, Interface: "wan", Prefix: netip.MustParsePrefix(prefix), Global: true, Dynamic: i%2 == 0}
+				addrs[i] = Address{Interface: "wan", Prefix: netip.MustParsePrefix(prefix), Global: true}
 			}
 			original := append([]Address(nil), addrs...)
 			prefix := netip.MustParsePrefix(tc.prefix)
-			index := 0
-			if len(tc.want) > 1 {
-				index = 1
-			}
-			got, err := Select(addrs, SelectOptions{Interface: "wan", Scope: "public", Prefix: &prefix, Index: index})
-			if err != nil {
-				t.Fatalf("Select: %v", err)
-			}
-			want := make([]netip.Addr, len(tc.want))
-			for i, ip := range tc.want {
-				want[i] = netip.MustParseAddr(ip)
-			}
-			if !reflect.DeepEqual(got.Candidates, want) || got.Address != original[tc.selected] {
-				t.Errorf("Select = %+v, want candidates %v, selected %+v", got, want, original[tc.selected])
+			for index, selected := range tc.want {
+				got, err := Select(addrs, SelectOptions{Interface: "wan", Scope: "public", Prefix: &prefix, Index: index})
+				if err != nil {
+					t.Fatalf("Select index %d: %v", index, err)
+				}
+				if got.Address != original[selected] {
+					t.Errorf("Select index %d = %+v, want address %+v", index, got, original[selected])
+				}
 			}
 			if !reflect.DeepEqual(addrs, original) {
 				t.Errorf("Select mutated input: got %+v, want %+v", addrs, original)

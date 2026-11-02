@@ -57,7 +57,6 @@ type fakeProvider struct {
 	records []dns.Record
 }
 
-func (*fakeProvider) Name() string { return "test" }
 func (p *fakeProvider) Ensure(ctx context.Context, record dns.Record, _ string) (dns.EnsureResult, error) {
 	p.mu.Lock()
 	p.records = append(p.records, record)
@@ -66,7 +65,7 @@ func (p *fakeProvider) Ensure(ctx context.Context, record dns.Record, _ string) 
 	if fn != nil {
 		err = fn(ctx, record)
 	}
-	return dns.EnsureResult{RecordID: "fake-id", Value: record.Value, Changed: true}, err
+	return dns.EnsureResult{RecordID: "fake-id", Changed: true}, err
 }
 
 type fixture struct {

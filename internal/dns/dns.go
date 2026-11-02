@@ -10,7 +10,6 @@ import (
 // Record is one A/AAAA record binding. Type is derived from the item family by
 // the service and is never read from config.
 type Record struct {
-	ID     string
 	Domain string
 	RR     string
 	Type   string
@@ -29,15 +28,12 @@ func (r Record) FQDN() string {
 
 // EnsureResult reports what Ensure did.
 type EnsureResult struct {
-	RecordID      string
-	Value         string
-	PreviousValue string
-	Changed       bool
+	RecordID string
+	Changed  bool
 }
 
 // Provider guarantees that the requested record value exists.
 type Provider interface {
-	Name() string
 	Ensure(ctx context.Context, r Record, recordIDHint string) (EnsureResult, error)
 }
 

@@ -46,7 +46,7 @@ func newFakeROS() *fakeROS {
 }
 
 func address(prefix string) ros.Address {
-	return ros.Address{ID: "*1", Interface: "wan", Prefix: netip.MustParsePrefix(prefix)}
+	return ros.Address{Interface: "wan", Prefix: netip.MustParsePrefix(prefix)}
 }
 
 func (f *fakeROS) Addresses(ctx context.Context, family ros.Family) ([]ros.Address, error) {
@@ -130,8 +130,6 @@ type fakeProvider struct {
 	changed    *bool
 }
 
-func (p *fakeProvider) Name() string { return "fake" }
-
 func (p *fakeProvider) Ensure(ctx context.Context, r dns.Record, hint string) (dns.EnsureResult, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, ensureCall{record: r, hint: hint})
@@ -157,7 +155,7 @@ func (p *fakeProvider) Ensure(ctx context.Context, r dns.Record, hint string) (d
 			return dns.EnsureResult{}, err
 		}
 	}
-	return dns.EnsureResult{RecordID: "id-" + r.FQDN(), Value: r.Value, Changed: changed}, nil
+	return dns.EnsureResult{RecordID: "id-" + r.FQDN(), Changed: changed}, nil
 }
 
 func (p *fakeProvider) setChanged(changed bool) {

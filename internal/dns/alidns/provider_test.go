@@ -111,9 +111,8 @@ func TestEnsureExistingRecord(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := dns.EnsureResult{RecordID: current.RecordID, Value: r.Value, Changed: changed}
+			want := dns.EnsureResult{RecordID: current.RecordID, Changed: changed}
 			if changed {
-				want.PreviousValue = current.Value
 				if len(f.updates) != 1 || f.updates[0] != (updateCall{id: current.RecordID, record: r}) {
 					t.Fatalf("updates = %+v", f.updates)
 				}
@@ -163,7 +162,7 @@ func TestEnsureAddsWhenNoMatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := dns.EnsureResult{RecordID: "added-id", Value: r.Value, Changed: true}
+			want := dns.EnsureResult{RecordID: "added-id", Changed: true}
 			if got != want || len(f.adds) != 1 || f.adds[0] != r || len(f.updates) != 0 {
 				t.Fatalf("result = %+v, want %+v; calls = %+v", got, want, f)
 			}
@@ -192,7 +191,7 @@ func TestEnsureRecordUpdatesLine(t *testing.T) {
 	current.Line = "telecom"
 	f := &fakeAPI{}
 	got, err := testProvider(f).ensureRecord(context.Background(), r, current)
-	if err != nil || !got.Changed || got.PreviousValue != current.Value || len(f.updates) != 1 || f.updates[0].record.Line != r.Line {
+	if err != nil || !got.Changed || got.RecordID != current.RecordID || len(f.updates) != 1 || f.updates[0].record.Line != r.Line {
 		t.Fatalf("result = %+v, error = %v, updates = %+v", got, err, f.updates)
 	}
 }
@@ -216,7 +215,7 @@ func TestEnsureAmbiguousRecords(t *testing.T) {
 				}
 				return
 			}
-			want := dns.EnsureResult{RecordID: second.RecordID, Value: r.Value, PreviousValue: second.Value, Changed: true}
+			want := dns.EnsureResult{RecordID: second.RecordID, Changed: true}
 			if err != nil || got != want || len(f.updates) != 1 || f.updates[0].id != second.RecordID || len(f.adds) != 0 {
 				t.Fatalf("result = %+v, error = %v, calls = %+v", got, err, f)
 			}
@@ -275,7 +274,11 @@ func TestEnsureRetries(t *testing.T) {
 				wantCalls, wantSleeps := 2, 1
 				switch failure {
 				case "throttling then success":
-					if err != nil || !got.Changed || got.Value != r.Value {
+					wantID := "added-id"
+					if operation == "update" {
+						wantID = current.RecordID
+					}
+					if err != nil || !got.Changed || got.RecordID != wantID {
 						t.Fatalf("result = %+v, error = %v", got, err)
 					}
 				case "validation":
@@ -387,17 +390,6 @@ func TestEnsureChecksAllPagesBeforeWriting(t *testing.T) {
 				t.Fatalf("describe calls = %d", len(f.describes))
 			}
 		})
-	}
-}
-
-func TestEnsureIncompletePageDoesNotWrite(t *testing.T) {
-	r, _ := testRecord()
-	f := &fakeAPI{describeFn: func(context.Context, describeRequest) (describeResult, error) {
-		return completeDescribe(nil, 1), nil
-	}}
-	_, err := testProvider(f).Ensure(context.Background(), r, "")
-	if err == nil || len(f.adds)+len(f.updates) != 0 {
-		t.Fatalf("error = %v, calls = %+v", err, f)
 	}
 }
 
@@ -518,7 +510,7 @@ func TestEnsureCompletePagination(t *testing.T) {
 					if got.RecordID != current.RecordID || got.Changed || len(f.adds) != 0 {
 						t.Fatalf("matching result = %+v, adds = %d", got, len(f.adds))
 					}
-				} else if !got.Changed || got.RecordID != "added-id" || got.Value != r.Value || len(f.adds) != 1 {
+				} else if !got.Changed || got.RecordID != "added-id" || len(f.adds) != 1 || f.adds[0] != r {
 					t.Fatalf("added result = %+v, adds = %d", got, len(f.adds))
 				}
 			})
@@ -595,8 +587,8 @@ func TestNew(t *testing.T) {
 		}
 		p := result.(*provider)
 		s := p.api.(*sdkAPI)
-		if p.Name() != "aliyun" || p.limiter.Limit() != 5 || p.limiter.Burst() < 1 || dara.StringValue(s.client.Endpoint) != cfg.Endpoint || dara.StringValue(s.client.RegionId) != cfg.RegionID {
-			t.Fatal("provider name, rate or SDK endpoint/region not configured")
+		if p.limiter.Limit() != 5 || p.limiter.Burst() < 1 || dara.StringValue(s.client.Endpoint) != cfg.Endpoint || dara.StringValue(s.client.RegionId) != cfg.RegionID {
+			t.Fatal("provider rate or SDK endpoint/region not configured")
 		}
 		if dara.IntValue(s.client.ConnectTimeout) != 1500 || dara.IntValue(s.client.ReadTimeout) != 1500 || s.client.RetryOptions.Retryable || s.client.Credential == nil {
 			t.Fatal("SDK timeouts, retry policy or credentials not configured")

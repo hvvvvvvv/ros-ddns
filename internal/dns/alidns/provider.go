@@ -91,8 +91,6 @@ func New(cfg config.ProviderConfig) (dns.Provider, error) {
 	}, nil
 }
 
-func (*provider) Name() string { return "aliyun" }
-
 // CloseIdleConnections releases idle sockets without disabling provider reuse.
 func (p *provider) CloseIdleConnections() {
 	if closer, ok := p.api.(interface{ CloseIdleConnections() }); ok {
@@ -116,7 +114,7 @@ func (p *provider) Ensure(ctx context.Context, r dns.Record, recordIDHint string
 			return dns.EnsureResult{}, err
 		}
 		slog.InfoContext(ctx, "Aliyun DNS record added", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
-		return dns.EnsureResult{RecordID: id, Value: r.Value, Changed: true}, nil
+		return dns.EnsureResult{RecordID: id, Changed: true}, nil
 	}
 
 	selected := matches[0]
@@ -192,7 +190,7 @@ func (p *provider) ensureRecord(ctx context.Context, r dns.Record, current remot
 		slog.WarnContext(ctx, "Aliyun DNS record is disabled; preserving status", "fqdn", r.FQDN(), "type", r.Type, "record_id", current.RecordID)
 	}
 	if normalizeValue(current.Value) == normalizeValue(r.Value) && current.TTL == int64(r.TTL) && current.Line == r.Line {
-		return dns.EnsureResult{RecordID: current.RecordID, Value: normalizeValue(current.Value)}, nil
+		return dns.EnsureResult{RecordID: current.RecordID}, nil
 	}
 	var id string
 	err := p.call(ctx, "UpdateDomainRecord", func() error {
@@ -204,7 +202,7 @@ func (p *provider) ensureRecord(ctx context.Context, r dns.Record, current remot
 		return dns.EnsureResult{}, err
 	}
 	slog.InfoContext(ctx, "Aliyun DNS record updated", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
-	return dns.EnsureResult{RecordID: id, Value: r.Value, PreviousValue: current.Value, Changed: true}, nil
+	return dns.EnsureResult{RecordID: id, Changed: true}, nil
 }
 
 func normalizeValue(value string) string {

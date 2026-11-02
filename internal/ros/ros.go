@@ -33,11 +33,9 @@ func (f Family) RecordType() string {
 
 // Address is one entry from /ip/address or /ipv6/address.
 type Address struct {
-	ID              string
 	Interface       string
 	ActualInterface string
 	Prefix          netip.Prefix
-	Dynamic         bool
 	Disabled        bool
 	Invalid         bool
 	Global          bool
@@ -74,11 +72,9 @@ type SelectOptions struct {
 	Index     int
 }
 
-// Selection is the chosen base address plus the candidates that survived
-// filtering (sorted ascending).
+// Selection is the chosen base address.
 type Selection struct {
-	Address    Address
-	Candidates []netip.Addr
+	Address Address
 }
 
 // ErrNoEligibleAddress is returned when no address satisfies the selector.

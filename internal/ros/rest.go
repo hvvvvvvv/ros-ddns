@@ -19,16 +19,14 @@ import (
 )
 
 const (
-	ipv4AddressProperties = ".id,address,interface,actual-interface,dynamic,disabled,invalid"
+	ipv4AddressProperties = ".id,address,interface,actual-interface,disabled,invalid"
 	ipv6AddressProperties = ipv4AddressProperties + ",global,link-local,deprecated"
 	listEntryProperties   = ".id,list,address,comment,timeout,dynamic,disabled"
 )
 
-// APIError describes a non-success response from RouterOS. Code is the string
-// representation of the response body's error field, when present.
+// APIError describes a non-success response from RouterOS.
 type APIError struct {
 	StatusCode int
-	Code       string
 	Message    string
 	Detail     string
 }
@@ -134,7 +132,6 @@ type addressDTO struct {
 	Address         string `json:"address"`
 	Interface       string `json:"interface"`
 	ActualInterface string `json:"actual-interface"`
-	Dynamic         string `json:"dynamic"`
 	Disabled        string `json:"disabled"`
 	Invalid         string `json:"invalid"`
 	Global          string `json:"global"`
@@ -172,11 +169,9 @@ func (c *restClient) Addresses(ctx context.Context, family Family) ([]Address, e
 			return nil, fmt.Errorf("parse RouterOS %s address %q (id %q): %w", family, entry.Address, entry.ID, err)
 		}
 		addresses = append(addresses, Address{
-			ID:              entry.ID,
 			Interface:       entry.Interface,
 			ActualInterface: entry.ActualInterface,
 			Prefix:          prefix,
-			Dynamic:         routerOSBool(entry.Dynamic),
 			Disabled:        routerOSBool(entry.Disabled),
 			Invalid:         routerOSBool(entry.Invalid),
 			Global:          routerOSBool(entry.Global),
@@ -329,18 +324,12 @@ func decodeAPIError(resp *http.Response) *APIError {
 		return apiErr
 	}
 	var body struct {
-		Code    json.RawMessage `json:"error"`
-		Message string          `json:"message"`
-		Detail  string          `json:"detail"`
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
 		apiErr.Detail = strings.TrimSpace(string(data))
 		return apiErr
-	}
-	if len(body.Code) > 0 && string(body.Code) != "null" {
-		if err := json.Unmarshal(body.Code, &apiErr.Code); err != nil {
-			apiErr.Code = string(body.Code)
-		}
 	}
 	if body.Message != "" {
 		apiErr.Message = body.Message
