@@ -53,9 +53,6 @@ func newSDKAPI(cfg config.ProviderConfig) (*sdkAPI, error) {
 	}
 	return &sdkAPI{client: client, httpClient: &http.Client{
 		Timeout: cfg.Timeout.Duration,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return newRedirectError(req.Response)
-		},
 	}}, nil
 }
 
@@ -70,8 +67,8 @@ type noRedirectTransport struct{ *http.Transport }
 func (t *noRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.Transport.RoundTrip(req)
 	if err == nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		// Malformed Location is parsed before CheckRedirect and would otherwise
-		// become a credential-bearing url.Error classified as a network failure.
+		// Reject before net/http parses Location, which could otherwise produce a
+		// credential-bearing url.Error classified as a network failure.
 		resp.Body.Close()
 		return nil, newRedirectError(resp)
 	}
@@ -124,12 +121,6 @@ func (c contextHTTPClient) Call(request *http.Request, transport *http.Transport
 		c.api.idleTransport.Store(pool)
 	})
 	response, err := c.api.httpClient.Do(request.Clone(c.ctx))
-	if response != nil && response.StatusCode >= 300 && response.StatusCode < 400 {
-		response.Body.Close()
-		// Do not propagate net/http's url.Error: it prints the raw Location and
-		// implements net.Error. Also reject 3xx that do not invoke CheckRedirect.
-		return nil, newRedirectError(response)
-	}
 	var redirect *redirectError
 	if errors.As(err, &redirect) {
 		return nil, redirect // Strip url.Error without changing network error chains.

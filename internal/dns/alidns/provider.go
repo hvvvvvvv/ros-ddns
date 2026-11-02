@@ -189,7 +189,7 @@ func (p *provider) ensureRecord(ctx context.Context, r dns.Record, current remot
 	if strings.EqualFold(current.Status, "DISABLE") {
 		slog.WarnContext(ctx, "Aliyun DNS record is disabled; preserving status", "fqdn", r.FQDN(), "type", r.Type, "record_id", current.RecordID)
 	}
-	if normalizeValue(current.Value) == normalizeValue(r.Value) && current.TTL == int64(r.TTL) && current.Line == r.Line {
+	if normalizeValue(current.Value) == normalizeValue(r.Value) && current.TTL == int64(r.TTL) {
 		return dns.EnsureResult{RecordID: current.RecordID}, nil
 	}
 	var id string
@@ -241,7 +241,8 @@ func (p *provider) call(ctx context.Context, operation string, fn func() error) 
 }
 
 func retryDelay(attempt int) time.Duration {
-	base := time.Second << min(attempt, 2) // 1s, 2s, 4s, plus up to 25% jitter.
+	// With maxAttempts == 3, call reaches this only for attempts 0 and 1.
+	base := time.Second << attempt // 1s or 2s, plus up to 25% jitter.
 	return base + time.Duration(rand.Int64N(int64(base/4)+1))
 }
 

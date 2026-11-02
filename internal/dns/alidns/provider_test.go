@@ -184,18 +184,6 @@ func TestEnsureFiltersBeforeSelectingHint(t *testing.T) {
 	}
 }
 
-func TestEnsureRecordUpdatesLine(t *testing.T) {
-	// Ensure filters by line first. Test the selected-record comparison directly
-	// so its line guard is covered without allowing cross-line hint migration.
-	r, current := testRecord()
-	current.Line = "telecom"
-	f := &fakeAPI{}
-	got, err := testProvider(f).ensureRecord(context.Background(), r, current)
-	if err != nil || !got.Changed || got.RecordID != current.RecordID || len(f.updates) != 1 || f.updates[0].record.Line != r.Line {
-		t.Fatalf("result = %+v, error = %v, updates = %+v", got, err, f.updates)
-	}
-}
-
 func TestEnsureAmbiguousRecords(t *testing.T) {
 	for _, hint := range []string{"", "stale-id", "second-id"} {
 		t.Run("hint="+hint, func(t *testing.T) {
