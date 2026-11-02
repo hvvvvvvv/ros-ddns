@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+
+	"ros-ddns/internal/atomicfile"
 )
 
 // readOriginal rechecks the hash after candidate construction. An editor may
@@ -39,31 +40,5 @@ func readOriginal(path, hash string) ([]byte, os.FileMode, error) {
 // replaceFile stages bytes in the destination directory, applies permissions,
 // syncs and closes before renaming. It never truncates the destination in place.
 func replaceFile(path string, data []byte, mode os.FileMode) error {
-	if mode == 0 {
-		mode = 0600
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	name := file.Name()
-	defer func() {
-		file.Close()
-		// Windows cannot remove a read-only temporary file after a failed rename.
-		os.Chmod(name, 0600)
-		os.Remove(name)
-	}()
-	if err := file.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return atomicfile.Write(path, data, mode)
 }

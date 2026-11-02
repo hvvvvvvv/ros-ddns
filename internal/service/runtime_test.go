@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ros-ddns/internal/config"
 	"ros-ddns/internal/dns"
 	"ros-ddns/internal/ros"
 )
@@ -53,10 +54,10 @@ func TestStableForAndInterruptedObservations(t *testing.T) {
 
 func TestSharedFamilyPollsFailuresAndReadiness(t *testing.T) {
 	c := testConfig()
-	v4 := cloneConfigItem(c.Items[0])
+	v4 := config.CloneItem(c.Items[0])
 	v4.Name = "second-v4"
 	v4.Domains, v4.AddressList = nil, nil
-	v6 := cloneConfigItem(c.Items[0])
+	v6 := config.CloneItem(c.Items[0])
 	v6.Name, v6.Source.Family = "v6", "ipv6"
 	c.Items = append(c.Items, v4, v6)
 	router, provider := newFakeROS(), &fakeProvider{}

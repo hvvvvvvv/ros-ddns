@@ -131,7 +131,7 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 	}
 	seenNames := make(map[string]bool)
 	for _, original := range cfg.Items {
-		c := cloneConfigItem(original)
+		c := config.CloneItem(original)
 		if c.Name == "" || seenNames[c.Name] {
 			return nil, fmt.Errorf("empty or duplicate item name %q", c.Name)
 		}
@@ -225,25 +225,6 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// runOnce polls once and forces each eligible, stable item synchronously. Force
-// bypasses target caches, not source eligibility or StableFor. It starts no
-// workers. Only poll/setup failures are returned; target errors are in Snapshot.
-//
-// This is a package-internal synchronous driver for tests; it is not exposed by
-// the CLI or the HTTP API.
-func (s *Service) runOnce(ctx context.Context) (Snapshot, error) {
-	if err := s.begin(); err != nil {
-		return s.Snapshot(), err
-	}
-	defer s.end()
-	pollErr := s.poller.pollAll(ctx)
-	for _, it := range s.items {
-		it.takeRequest() // consume any startup force that the poll satisfied
-		it.reconcile(ctx, true)
-	}
-	return s.Snapshot(), pollErr
-}
-
 // Snapshot returns a deep copy in config order, including disabled items.
 func (s *Service) Snapshot() Snapshot {
 	out := Snapshot{ConfigPath: s.configPath, StartedAt: s.startedAt, Items: make([]ItemStatus, 0, len(s.ordered))}
@@ -317,18 +298,4 @@ func (s *Service) errorText(err error) string {
 		return ""
 	}
 	return s.redactor.Replace(err.Error())
-}
-
-func cloneConfigItem(c config.ItemConfig) config.ItemConfig {
-	c.Domains = append([]config.DomainConfig(nil), c.Domains...)
-	c.Source.EUI64MACAddr = append(c.Source.EUI64MACAddr[:0:0], c.Source.EUI64MACAddr...)
-	if c.Source.Select.PrefixNet != nil {
-		prefix := *c.Source.Select.PrefixNet
-		c.Source.Select.PrefixNet = &prefix
-	}
-	if c.AddressList != nil {
-		list := *c.AddressList
-		c.AddressList = &list
-	}
-	return c
 }

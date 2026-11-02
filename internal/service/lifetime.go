@@ -21,6 +21,11 @@ func sameLifetime(configured, actual string) bool {
 
 // parseROSDuration accepts RouterOS unit, clock and plain-second formats.
 // Check overflow so a large/malformed timeout cannot become a short timer.
+//
+// This parser is deliberately more permissive than config's strict
+// validation: it interprets values returned by RouterOS during reconciliation
+// (for example clock formats the configuration layer rejects). Keep the two
+// behaviours separate rather than merging the parsers.
 func parseROSDuration(value string) (time.Duration, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {

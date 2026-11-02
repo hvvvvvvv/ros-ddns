@@ -14,7 +14,7 @@ import (
 func dualFamilyConfig() *config.Config {
 	c := testConfig()
 	c.Items[0].Domains, c.Items[0].AddressList = nil, nil
-	v6 := cloneConfigItem(c.Items[0])
+	v6 := config.CloneItem(c.Items[0])
 	v6.Name, v6.Source.Family = "v6", "ipv6"
 	c.Items = append(c.Items, v6)
 	return c

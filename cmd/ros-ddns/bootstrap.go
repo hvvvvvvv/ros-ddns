@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"ros-ddns/internal/atomicfile"
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/instancelock"
 	"ros-ddns/internal/pathguard"
@@ -184,29 +185,8 @@ func writeDefaultConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(dir, ".ros-ddns-default-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create default configuration: %w", err)
-	}
-	name := temp.Name()
-	defer func() {
-		_ = temp.Close()
-		_ = os.Remove(name)
-	}()
-	if err := temp.Chmod(0600); err != nil {
-		return fmt.Errorf("set default configuration mode: %w", err)
-	}
-	if _, err := temp.Write(content); err != nil {
+	if err := atomicfile.Write(path, content, 0600); err != nil {
 		return fmt.Errorf("write default configuration: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		return fmt.Errorf("sync default configuration: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close default configuration: %w", err)
-	}
-	if err := os.Rename(name, path); err != nil {
-		return fmt.Errorf("install default configuration: %w", err)
 	}
 	return nil
 }

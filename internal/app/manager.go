@@ -304,17 +304,7 @@ func cloneConfig(cfg *config.Config) *config.Config {
 	}
 	copy.Items = append([]config.ItemConfig(nil), cfg.Items...)
 	for i := range copy.Items {
-		item := &copy.Items[i]
-		item.Domains = append([]config.DomainConfig(nil), item.Domains...)
-		item.Source.EUI64MACAddr = append(item.Source.EUI64MACAddr[:0:0], item.Source.EUI64MACAddr...)
-		if item.Source.Select.PrefixNet != nil {
-			prefix := *item.Source.Select.PrefixNet
-			item.Source.Select.PrefixNet = &prefix
-		}
-		if item.AddressList != nil {
-			list := *item.AddressList
-			item.AddressList = &list
-		}
+		copy.Items[i] = config.CloneItem(copy.Items[i])
 	}
 	return &copy
 }

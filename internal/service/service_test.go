@@ -520,11 +520,11 @@ func TestPersistedHintsStartupForceAndFreshReadiness(t *testing.T) {
 
 func TestDisabledItemsFactoriesAndSelectorOptions(t *testing.T) {
 	c := testConfig()
-	second := cloneConfigItem(c.Items[0])
+	second := config.CloneItem(c.Items[0])
 	second.Name, second.Source.Family = "v6", "ipv6"
 	second.AddressList = nil
 	c.Items = append(c.Items, second)
-	disabled := cloneConfigItem(c.Items[0])
+	disabled := config.CloneItem(c.Items[0])
 	disabled.Name, disabled.Disabled = "off", true
 	disabled.Domains[0].Provider = "not-constructed"
 	c.Items = append(c.Items, disabled)

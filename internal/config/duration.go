@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// Configuration timeouts are validated strictly for RouterOS address-list
+// limits and nanosecond precision. The service lifetime parser is deliberately
+// more permissive when interpreting remote RouterOS values for reconciliation.
 // RouterOS address-list timeouts are limited to 35w3d13h13m56s, inclusive.
 const maxROSTimeout time.Duration = 35*7*24*time.Hour + 3*24*time.Hour + 13*time.Hour + 13*time.Minute + 56*time.Second
 
@@ -17,7 +20,6 @@ var (
 
 // parseROSDuration accepts non-negative unit, clock and plain-second durations.
 // Empty config timeouts denote static entries and are handled by the caller.
-// Keep these semantics aligned with the separate service lifetime parser.
 func parseROSDuration(value string) (time.Duration, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
