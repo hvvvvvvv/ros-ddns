@@ -1,6 +1,6 @@
 # ros-ddns
 
-[![Go](https://img.shields.io/badge/Go-1.26.2%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go](https://img.shields.io/badge/Go-1.26.10%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 用 Go 编写的单二进制动态 DNS 守护进程：从 RouterOS 7 路由器读取接口地址，自动维护阿里云解析（Alidns）的 A / AAAA 记录，并可将地址同步到 RouterOS 防火墙的 `address-list`。
@@ -38,7 +38,7 @@ docker compose up -d --build
 
 ### 从源码运行
 
-需要 Go 1.26.2 或更高版本。
+需要 Go 1.26.10 或更高版本（Go 1.21+ 会按 `go.mod` 的 `go` 要求自动下载匹配工具链）。
 
 ```bash
 # 可选：启动前用环境变量覆盖默认配置模板中的值

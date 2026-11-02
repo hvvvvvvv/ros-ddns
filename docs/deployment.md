@@ -37,7 +37,7 @@
 
 ### 2.1 前提与构建
 
-目标为 Linux（systemd）或 Windows。运行主机需可信 CA 证书、到 RouterOS / 阿里云的网络，以及正确的系统时间。编译需 Go 1.26.2 或更高；已有匹配架构的二进制则无需在服务器安装 Go。
+目标为 Linux（systemd）或 Windows。运行主机需可信 CA 证书、到 RouterOS / 阿里云的网络，以及正确的系统时间。编译需 Go 1.26.10 或更高；已有匹配架构的二进制则无需在服务器安装 Go。
 
 ```bash
 # 在源码根目录，Linux/CI；生成静态 Linux amd64 二进制
