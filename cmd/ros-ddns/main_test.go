@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/instancelock"
+	"ros-ddns/internal/logging"
 	"ros-ddns/internal/pathguard"
 	"ros-ddns/internal/svcmgr"
 	"ros-ddns/internal/version"
@@ -675,6 +677,14 @@ func TestRunHTTPWarning(t *testing.T) {
 	if !strings.HasPrefix(stdout.String(), "config: ") || strings.Contains(stderr.String(), "dummy-router-password") {
 		t.Errorf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
+}
+
+// newLogger keeps the historical testable helper. The daemon uses
+// newBaseHandler plus logging.NewHandler so the UI can also receive records.
+func newLogger(cfg config.LogConfig, output io.Writer) *slog.Logger {
+	level := &slog.LevelVar{}
+	level.Set(parseLogLevel(cfg.Level))
+	return slog.New(logging.NewHandler(newBaseHandler(cfg, output, level), nil, level))
 }
 
 func TestLoggerLevelsAndFormats(t *testing.T) {

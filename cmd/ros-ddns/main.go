@@ -302,14 +302,6 @@ func newBaseHandler(cfg config.LogConfig, output io.Writer, level *slog.LevelVar
 	return slog.NewTextHandler(output, opts)
 }
 
-// newLogger keeps the historical testable helper. The daemon uses
-// newBaseHandler plus logging.NewHandler so the UI can also receive records.
-func newLogger(cfg config.LogConfig, output io.Writer) *slog.Logger {
-	level := &slog.LevelVar{}
-	level.Set(parseLogLevel(cfg.Level))
-	return slog.New(logging.NewHandler(newBaseHandler(cfg, output, level), nil, level))
-}
-
 func parseLogLevel(value string) slog.Level {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(value)); err == nil {
