@@ -206,33 +206,9 @@ Manager 串行处理保存：比对 `baseHash`、校验配置及文件路径冲�
 - 状态 API 没有凭据字段；服务对错误中的已配置秘密脱敏，日志处理器在写 stderr 和内存日志流前清洗消息与属性，页面显示 / 复制时还有脱敏处理。不要把秘密写进名称、URL 路径或其他普通字段；任意上游文本和其他编码形式不在完整保证范围内。状态、日志、通知及截图仍可能包含 IP、域名、MAC、RecordId 或路径，分享前需检查。
 - 服务端日志环形缓冲最多 **2,000 条**，通知最多 **200 条**，都只在内存中，溢出淘汰旧记录；进程重启后丢失，热重载不会清空。`state.path` 保存同步缓存，不保存日志或通知历史。
 
-## 6. 验证与验收记录
+## 6. 验证与验收
 
-仓库现有测试覆盖结构化配置、哈希冲突、重载失败与回滚、认证、静态资源、历史 / SSE、日志脱敏及通知状态转换。可在仓库根目录运行：
-
-```powershell
-# Windows：使用仓库内缓存
-.\scripts\go.cmd test ./...
-.\scripts\go.cmd vet ./...
-# 检查自己的配置；不启动监听或连接外部系统
-.\scripts\go.cmd run ./cmd/ros-ddns -config build/configs/config.local.yaml -check
-```
-
-```bash
-# Linux
-go test ./...
-go vet ./...
-go run ./cmd/ros-ddns -config build/configs/config.local.yaml -check
-```
-
-以下是 dry-run 模式移除前完成的真实 RouterOS Playwright 验收记录（该模式已移除，截图 header 可能仍显示 Dry run 徽标）：
-
-1. 从真实 `lan1` 读取 IPv6，Dashboard 显示来源地址 `240e:399:45ce:16b2::1/64`；MAC `58:11:22:b9:9b:f1` 派生的 `recordValue` 为 `240e:399:45ce:16b2:5a11:22ff:feb9:9bf1`。这些是该次验收的观测值，不是部署默认值。
-2. 将来源设为不存在的接口，出现无合格地址的错误状态；通过 Config **表单**修正回 `lan1`，保存并应用，完成热重载。
-3. 重新读取到真实源地址后，项目恢复到无错误状态（当时为 dry-run 模式），并收到恢复通知 `item_recovery`；配置应用事件为 `config_applied`。通知截图展示的是配置应用事件。
-4. 当时日志可见 `dry-run: would ensure DNS record` 和 `dry-run: would add address-list entry` 计划；该次验收没有写 DNS 或地址列表（dry-run 模式已移除，现行版本会执行真实对账）。表单保存仍会写配置文件与 `.bak`。
-
-这次验收证明真实源读取、EUI-64 展示、表单修复、热重载和页内恢复通知链路。它不验证阿里云写权限、DNS 解析传播或 RouterOS 列表写权限；真实写入检查另见 [阿里云指南](aliyun-setup.md) 与 [RouterOS 指南](routeros-setup.md)。
+本地测试命令、验收约定与历史验收记录见 [贡献指南](../CONTRIBUTING.md#验证与验收)。
 
 ## 7. 限制与范围
 

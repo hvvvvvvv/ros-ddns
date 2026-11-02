@@ -231,22 +231,4 @@ docker compose logs --tail=100 ros-ddns
 - 在服务器分别验证服务安装与可选加固 drop-in、Docker bind mount / healthcheck、日志和 20 秒停止窗口。
 - 在专用测试目标验证 RouterOS 与 DNS 读写、续期、故障恢复、升级及回滚。`-check` 只做静态校验，不验证阿里云权限或真实 DNS 写入，本地单元测试也不替代这一步。
 
-## 5. 本次 P0 验收记录
-
-验收日期：2026-10-31；主机 `1p-server`；Debian 13 / systemd 257 / Docker 29.1.5 / Docker Compose v5.0.2。使用 Linux amd64 静态二进制 `v0.1.0-p0verify` 和同源码构建的 `ros-ddns:local` 镜像。本次验收发生在 dry-run 模式移除之前（当时所有运行均带 `-dry-run`，仅读取 RouterOS，未写 DNS 或 address-list）；因此只验收部署、锁、权限、探针和配置保存，不构成真实写入验收。
-
-**注意**：下表中 systemd 相关行记录的是已移除的旧 systemd 安装脚本方案（仓库不再包含该脚本），仅作历史参考；新的 `-service` 方案尚未在 Linux 服务器上验收。
-
-| 项目 | 结果 |
-| --- | --- |
-| 旧方案 systemd 安装（历史） | 安装器创建用户/目录/unit 并 enable；二进制 `0755 root:root`，配置 `0600 ros-ddns:ros-ddns`，env `0600 root:root`，目录 `0700/0750` |
-| 旧方案 systemd 运行（历史） | 服务以 `ros-ddns`（UID 999）运行；unit 含显式 `-lock-file`；`healthz` 200、`readyz` 200 |
-| 单实例 | 第二进程退出 `1`，报告持有者 PID；持锁时 `-check` 返回 `0` 且不连接远端 |
-| 锁与恢复 | 锁文件 `0600`；SIGKILL 后旧方案 systemd 自动重启并取得新锁；`systemctl restart` 正常；停止后锁文件保留、可再次启动 |
-| 配置保存 | `GET /api/v1/config` 的 token 为掩码；原样 `PUT` 返回 `200`，磁盘配置与 `.bak` 均保持 `0600`，服务保持 active |
-| Docker 构建 | 多阶段构建成功；镜像内版本为 `v0.1.0-p0verify`；Compose `config --quiet` 通过 |
-| Docker 运行 | 以 UID/GID 10001 非 root 运行，rootfs 只读，`cap_drop: ALL`；healthcheck 为 healthy；`healthz/readyz` 200 |
-| Docker 锁与保存 | 同 `/data` 的第二个容器退出 `1`（锁冲突）；WebUI 保存写入宿主机 `data/config.yaml` 和 `.bak`，权限保持 `0600` |
-| 停机与清理 | `docker compose stop` 正常退出 `0`，锁文件保留，重启后探针恢复；验收后已删除 unit、用户/组、安装目录、二进制、容器、网络、镜像、临时源码和 root-only env，确认无进程、无监听端口、无残留目录/镜像 |
-
-本次使用临时 root-only env 注入测试凭据，验证后已删除；日志与 Compose 日志中未匹配到凭据值。Docker 的异常退出自动重启未单独模拟，正常 stop/start 与旧方案 systemd SIGKILL 恢复已验证。共享 Docker 构建缓存未清理；如需彻底回收磁盘，请由管理员评估后执行 `docker builder prune`。
+历史验收记录（部署与 WebUI，含 dry-run 时期）与验收约定见 [贡献指南](../CONTRIBUTING.md#历史验收记录)。

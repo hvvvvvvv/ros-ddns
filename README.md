@@ -15,18 +15,6 @@
 - **易部署**：原生支持 systemd / Windows 服务，另提供 Docker Compose 部署。
 - **凭据安全**：凭据只从环境变量或配置文件读取，日志输出自动脱敏。
 
-## 工作原理
-
-```mermaid
-flowchart LR
-    ROS["RouterOS 7<br/>(REST)"] -->|接口地址| APP["ros-ddns"]
-    APP -->|A / AAAA| DNS["阿里云解析"]
-    APP -->|可选| LIST["address-list"]
-    UI["WebUI / HTTP API"] <--> APP
-```
-
-守护进程定期从 RouterOS 读取接口地址，待地址稳定后更新阿里云 DNS 记录和（可选的）`address-list`，同时把运行状态缓存到本地供 WebUI 和 API 查询。详细设计见 [架构设计](docs/architecture.md)。
-
 ## 快速开始
 
 ### 准备
@@ -155,19 +143,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Authorization
 - EUI-64 仅用于合成 IPv6 地址，不分配地址也不保证可达；目标使用隐私地址或非 MAC IID 时需自行核实。
 - 云端生效时间受轮询、重试、TTL 和解析套餐影响，不保证固定的全网生效时间。
 
-## 开发
-
-```bash
-make build         # 构建当前平台二进制
-make build-linux   # 静态交叉编译 Linux amd64
-make test vet      # 单元测试 / 静态检查
-make docker-build  # 构建容器镜像
-```
-
-Windows 下 Makefile 会调用 `scripts\go.cmd`；本地构建产物、缓存、配置、日志与凭据统一放在 `build/`，该目录已在 `.gitignore` 和 `.dockerignore` 中忽略。
-
 ## 文档
 
+- [贡献指南](CONTRIBUTING.md)：本地开发、构建测试、目录约定与验收要求。
 - [生产部署指南](docs/deployment.md)：单实例锁、systemd / Windows 服务、Docker、升级与回滚。
 - [WebUI 使用指南](docs/webui.md)：页面操作、配置热重载、HTTP API、实时日志与通知。
 - [配置参考](docs/configuration.md)：完整字段、默认值、环境变量展开与校验规则。
