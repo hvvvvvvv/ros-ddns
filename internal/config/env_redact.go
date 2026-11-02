@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/netip"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,9 +23,9 @@ func redactEnvError(err error, values map[string]struct{}) error {
 	return errors.New(redacted)
 }
 
-// redactEnvValues matches against the original message, longest first, then
-// replaces the union of all matching spans. Overlaps cannot leave secret tails
-// behind, and replacement text is never searched again.
+// redactEnvValues matches against the original message and replaces the union
+// of all matching spans. Overlaps cannot leave secret tails behind, and
+// replacement text is never searched again.
 func redactEnvValues(message string, values map[string]struct{}) string {
 	// The bool records whether a pattern needs ASCII token boundaries. Escaping
 	// a short value must not accidentally turn it into an unbounded pattern.
@@ -87,18 +86,8 @@ func redactEnvValues(message string, values map[string]struct{}) string {
 		}
 	}
 
-	ordered := make([]string, 0, len(patterns))
-	for value := range patterns {
-		ordered = append(ordered, value)
-	}
-	sort.Slice(ordered, func(i, j int) bool {
-		if len(ordered[i]) == len(ordered[j]) {
-			return ordered[i] < ordered[j]
-		}
-		return len(ordered[i]) > len(ordered[j])
-	})
 	var hidden []bool
-	for _, value := range ordered {
+	for value, bounded := range patterns {
 		for offset := 0; offset < len(message); {
 			n := strings.Index(message[offset:], value)
 			if n < 0 {
@@ -107,7 +96,7 @@ func redactEnvValues(message string, values map[string]struct{}) string {
 			start := offset + n
 			end := start + len(value)
 			offset = start + 1 // Include overlapping occurrences.
-			if patterns[value] && ((start > 0 && envASCIIAlphanumeric(message[start-1])) ||
+			if bounded && ((start > 0 && envASCIIAlphanumeric(message[start-1])) ||
 				(end < len(message) && envASCIIAlphanumeric(message[end]))) {
 				continue
 			}

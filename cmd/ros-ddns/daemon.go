@@ -22,7 +22,6 @@ type daemonSession struct {
 	opts    app.Options
 
 	mu      sync.Mutex
-	cancel  context.CancelFunc
 	apiDone chan error
 	runDone chan error
 }
@@ -47,7 +46,6 @@ func (s *daemonSession) start(parent context.Context) error {
 	}
 
 	s.mu.Lock()
-	s.cancel = cancel
 	s.apiDone = make(chan error, 1)
 	s.runDone = make(chan error, 1)
 	apiDone, runDone := s.apiDone, s.runDone
@@ -76,7 +74,7 @@ func (s *daemonSession) start(parent context.Context) error {
 }
 
 // wait joins the API server and the manager. Both stop after the context is
-// canceled; the first error is reported as a joined error.
+// canceled; errors.Join preserves errors from both.
 func (s *daemonSession) wait() error {
 	s.mu.Lock()
 	apiDone, runDone := s.apiDone, s.runDone

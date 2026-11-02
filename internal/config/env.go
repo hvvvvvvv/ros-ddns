@@ -123,9 +123,9 @@ func (r *scalarReference) UnmarshalYAML(node *yaml.Node) error {
 
 // normalizeExpandedBooleans accepts environment-expanded scalars for the
 // direct boolean fields of this schema when they expand to true or false, and
-// retags those nodes so YAML decoding produces a bool. Values expanded through
-// aliases or merge keys are intentionally left alone: those paths keep the
-// strict string behavior and are rejected by the decoder.
+// retags those nodes so YAML decoding produces a bool. Aliases and merge keys
+// are not followed here; unsupported expanded values reached that way are
+// rejected by the decoder or by validateExpandedBooleanValues after decoding.
 func normalizeExpandedBooleans(document *yaml.Node, expanded map[*yaml.Node]bool) error {
 	if len(expanded) == 0 || document == nil || len(document.Content) == 0 {
 		return nil

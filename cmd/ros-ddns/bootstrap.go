@@ -20,7 +20,6 @@ var errPrepareDefaultConfig = errors.New("prepare default configuration")
 // configRecovery describes how a daemon start handled a configuration that
 // could not be loaded.
 type configRecovery struct {
-	Created     bool
 	Quarantined string
 	LoadErr     error
 }
@@ -57,7 +56,6 @@ func recoverConfig(path string, cause error) (*configRecovery, error) {
 	if err := writeDefaultConfig(path); err != nil {
 		return nil, err
 	}
-	recovery.Created = true
 	return recovery, nil
 }
 

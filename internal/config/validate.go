@@ -324,15 +324,7 @@ func validRR(rr string) bool {
 	if rr == "@" || rr == "*" {
 		return true
 	}
-	if len(rr) == 0 || len(rr) > 253 {
-		return false
-	}
-	for _, label := range strings.Split(rr, ".") {
-		if !fqdnLabelRE.MatchString(label) {
-			return false
-		}
-	}
-	return true
+	return validDomain(rr)
 }
 
 // loopbackListenHost reports whether binding to host keeps the API local.
@@ -351,7 +343,7 @@ func loopbackListenHost(host string) bool {
 	return ip.IsLoopback()
 }
 
-func trimSpace(s string) string {
+func trim(s string) string {
 	return strings.TrimSpace(s)
 }
 

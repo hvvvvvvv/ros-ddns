@@ -221,6 +221,9 @@ func TestServiceProgramStartStop(t *testing.T) {
 	if err := program.Stop(nil); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
+	if runner.waitCalls != 1 {
+		t.Fatalf("wait calls = %d, want 1", runner.waitCalls)
+	}
 	if !program.stopping.Load() {
 		t.Fatal("program should be marked as stopping")
 	}

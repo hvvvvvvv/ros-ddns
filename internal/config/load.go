@@ -146,7 +146,3 @@ func (c *Config) Normalize() {
 		}
 	}
 }
-
-func trim(s string) string {
-	return trimSpace(s)
-}

@@ -194,9 +194,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			slog.Error("configuration could not be loaded; preserved it and wrote the default configuration",
 				"preserved", recovery.Quarantined, "error", recovery.LoadErr)
 		}
-		if recovery.Created {
-			slog.Warn("wrote default configuration; edit it or use the WebUI", "path", absConfigPath)
-		}
+		slog.Warn("wrote default configuration; edit it or use the WebUI", "path", absConfigPath)
 	}
 
 	if strings.HasPrefix(strings.ToLower(cfg.RouterOS.URL), "http://") {
@@ -224,12 +222,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	notifications := notify.NewStore(200)
 	defer notifications.Close()
 	if recovery != nil {
-		if recovery.Created {
-			notifications.Add(notify.Event{
-				Kind: "configuration_default_created", Severity: "warning",
-				Message: "配置文件缺失或无法加载，已生成默认配置；请编辑配置文件或使用 WebUI 完成配置。",
-			})
-		}
+		notifications.Add(notify.Event{
+			Kind: "configuration_default_created", Severity: "warning",
+			Message: "配置文件缺失或无法加载，已生成默认配置；请编辑配置文件或使用 WebUI 完成配置。",
+		})
 		if recovery.Quarantined != "" {
 			notifications.Add(notify.Event{
 				Kind: "configuration_quarantined", Severity: "error",
@@ -266,8 +262,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Service-managed daemon: the service manager owns the process lifecycle,
-	// invokes Start/Stop and polls the health endpoint.
+	// Service-managed daemon: the service manager controls the process lifecycle
+	// through Start/Stop callbacks.
 	program.session = session
 	program.exit = os.Exit
 	if err := serviceHandle.Run(); err != nil {

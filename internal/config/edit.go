@@ -64,7 +64,7 @@ func ReadDocument(path string) (Document, error) {
 		return Document{}, err
 	}
 	hash := sha256.Sum256(raw)
-	_, tokenIsString := yamlStringScalarAt(&node, "api", "token")
+	tokenIsString := yamlStringScalarAt(&node, "api", "token")
 	return Document{
 		Path: path, Data: data, Hash: hex.EncodeToString(hash[:]),
 		APITokenString: tokenIsString,
@@ -75,19 +75,19 @@ func ReadDocument(path string) (Document, error) {
 // string scalar. Explicit keys override merges; earlier merge sequence entries
 // override later ones. Reuse the decoder's merge/alias and duplicate-key rules
 // while scalarReference retains each effective value's original YAML tag.
-func yamlStringScalarAt(root *yaml.Node, keys ...string) (*yaml.Node, bool) {
+func yamlStringScalarAt(root *yaml.Node, keys ...string) bool {
 	node := root
 	for _, key := range keys {
 		var fields map[string]scalarReference
 		if node == nil || node.Decode(&fields) != nil {
-			return nil, false
+			return false
 		}
 		node = fields[key].node
 	}
 	if node == nil || node.Kind != yaml.ScalarNode {
-		return node, false
+		return false
 	}
-	return node, node.Tag == "!!str"
+	return node.Tag == "!!str"
 }
 
 // DecodeStructured decodes exactly one JSON object. Numbers are normalized

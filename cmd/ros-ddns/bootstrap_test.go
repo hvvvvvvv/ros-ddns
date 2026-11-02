@@ -78,7 +78,7 @@ func TestRecoverConfigCreatesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recovery.Created || recovery.Quarantined != "" {
+	if recovery == nil || recovery.Quarantined != "" {
 		t.Fatalf("recovery = %+v, want created without quarantine", recovery)
 	}
 	if recovery.LoadErr == nil {
@@ -147,7 +147,7 @@ func TestRecoverConfigQuarantinesUnloadableFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery.Quarantined == "" || !recovery.Created {
+	if recovery == nil || recovery.Quarantined == "" {
 		t.Fatalf("recovery = %+v, want quarantined and created", recovery)
 	}
 	if !strings.HasPrefix(filepath.Base(recovery.Quarantined), "config.yaml.invalid-") {
@@ -193,7 +193,7 @@ func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery == nil || !recovery.Created || recovery.Quarantined != "" {
+	if recovery == nil || recovery.Quarantined != "" {
 		t.Fatalf("recovery = %+v", recovery)
 	}
 	if cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 1 {
@@ -270,7 +270,7 @@ func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery == nil || recovery.Quarantined == "" || !recovery.Created {
+	if recovery == nil || recovery.Quarantined == "" {
 		t.Fatalf("recovery = %+v", recovery)
 	}
 	if _, err := os.Stat(recovery.Quarantined); err != nil {

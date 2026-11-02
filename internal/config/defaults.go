@@ -9,8 +9,8 @@ import _ "embed"
 var defaultConfigYAML []byte
 
 // DefaultConfigYAML returns a fresh copy of the built-in configuration used
-// when the configured file does not exist (or cannot be loaded) and the daemon
-// runs under the OS service manager.
+// when the configured file is missing during an interactive or service-managed
+// start, or cannot be loaded during a service-managed start.
 func DefaultConfigYAML() []byte {
 	return append([]byte(nil), defaultConfigYAML...)
 }

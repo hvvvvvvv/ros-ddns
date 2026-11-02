@@ -113,7 +113,6 @@ func TestUnknownVersionRejected(t *testing.T) {
 
 func TestEnvExpansion(t *testing.T) {
 	t.Setenv("ROS_DDNS_TEST_ID", "env-id")
-	t.Setenv("ROS_DDNS_TEST_EMPTY", "")
 	cfgYAML := `
 routeros:
   url: https://192.168.88.1
