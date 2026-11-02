@@ -8,9 +8,27 @@ BIN ?= build/bin/ros-ddns
 RM = rm -rf
 endif
 
-VERSION ?= dev
-COMMIT ?= unknown
-BUILD_DATE ?= unknown
+# Build metadata defaults to the checked-out git state. Override with make
+# variables (e.g. `make build VERSION=v0.1.0`) or the environment when building
+# from an export without .git.
+ifeq ($(origin VERSION), undefined)
+VERSION := $(shell git describe --tags --always --dirty)
+endif
+ifeq ($(origin COMMIT), undefined)
+COMMIT := $(shell git rev-parse --short HEAD)
+endif
+ifeq ($(origin BUILD_DATE), undefined)
+BUILD_DATE := $(shell git log -1 --format=%cI)
+endif
+ifeq ($(strip $(VERSION)),)
+VERSION := dev
+endif
+ifeq ($(strip $(COMMIT)),)
+COMMIT := unknown
+endif
+ifeq ($(strip $(BUILD_DATE)),)
+BUILD_DATE := unknown
+endif
 LDFLAGS = -X ros-ddns/internal/version.Version=$(VERSION) -X ros-ddns/internal/version.Commit=$(COMMIT) -X ros-ddns/internal/version.BuildDate=$(BUILD_DATE)
 LINUX_BIN ?= build/bin/ros-ddns-linux-amd64
 DOCKER ?= docker

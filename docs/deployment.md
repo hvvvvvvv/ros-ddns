@@ -40,10 +40,15 @@
 目标为 Linux（systemd）或 Windows。运行主机需可信 CA 证书、到 RouterOS / 阿里云的网络，以及正确的系统时间。编译需 Go 1.26.10 或更高；已有匹配架构的二进制则无需在服务器安装 Go。
 
 ```bash
-# 在源码根目录，Linux/CI；生成静态 Linux amd64 二进制
-make build-linux VERSION=v0.1.0 COMMIT=local BUILD_DATE=2026-10-31T00:00:00Z
-# 没有 make 时的等价构建（使用默认构建元数据）
+# 在源码根目录，Linux/CI；生成静态 Linux amd64 二进制。
+# 未显式指定时，make 目标从当前 git 检出推导 VERSION（tag 存在时为 tag，
+# 如 v0.1.0）、短 COMMIT 与提交时间；也可覆盖：make build-linux VERSION=v0.1.0
+make build-linux
+# 没有 make 时的等价构建；go build 不会自动注入版本，需自行传 -ldflags
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+  -ldflags "-X ros-ddns/internal/version.Version=$(git describe --tags --always --dirty) \
+    -X ros-ddns/internal/version.Commit=$(git rev-parse --short HEAD) \
+    -X ros-ddns/internal/version.BuildDate=$(git log -1 --format=%cI)" \
   -o build/bin/ros-ddns-linux-amd64 ./cmd/ros-ddns
 ```
 
@@ -172,7 +177,7 @@ sudo /usr/local/bin/ros-ddns -service restart
 
 ### 3.1 前提与准备
 
-目标为支持 Linux 容器的 Docker Engine / Docker Desktop 与 Compose v2。首次构建需能拉取构建镜像和依赖；`Dockerfile` 使用 `golang:1.26-bookworm` 多阶段静态编译，运行镜像为带 CA 与时区数据的 `alpine:3.22`，只复制二进制。构建元数据可由 `VERSION`、`COMMIT`、`BUILD_DATE` build args 注入，也可执行 `make docker-build`。构建上下文排除 `.env`、`.secrets`、本地配置、缓存与数据目录，凭据不应通过构建参数传入。
+目标为支持 Linux 容器的 Docker Engine / Docker Desktop 与 Compose v2。首次构建需能拉取构建镜像和依赖；`Dockerfile` 使用 `golang:1.26-bookworm` 多阶段静态编译，运行镜像为带 CA 与时区数据的 `alpine:3.22`，只复制二进制。构建元数据可由 `VERSION`、`COMMIT`、`BUILD_DATE` build args 注入；`make docker-build` 会自动带入当前 git 版本（tag 存在时为 `v0.1.0`）并写入镜像 OCI 标签，例如 `make docker-build IMAGE=ros-ddns:v0.1.0`。直接 `docker build` 需显式传 `--build-arg`，否则镜像内版本为 `dev` / `unknown`。构建上下文排除 `.env`、`.secrets`、本地配置、缓存与数据目录，凭据不应通过构建参数传入。
 
 以下为 Linux 宿主机首次准备命令；`data/` 必须先存在并允许 `10001` 写入，容器首次启动会在其中生成 `config.yaml`：
 
