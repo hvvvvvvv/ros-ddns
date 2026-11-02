@@ -20,6 +20,18 @@ type reconcileResult struct {
 	err      error
 }
 
+var errSourceChanged = errors.New("source changed or became unavailable during reconciliation")
+
+func (it *item) sourceCurrentLocked(desired string, revision uint64) bool {
+	return it.usableLocked() && it.desired == desired && it.revision == revision
+}
+
+func (it *item) sourceCurrent(desired string, revision uint64) bool {
+	it.mu.RLock()
+	defer it.mu.RUnlock()
+	return it.sourceCurrentLocked(desired, revision)
+}
+
 // reconcile is intentionally callable directly by in-package tests. Normal
 // source/retry work passes force=false; force checks every configured target.
 func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
@@ -32,15 +44,31 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 		return reconcileResult{}
 	}
 	desired, revision, listGeneration := it.desired, it.revision, it.listGeneration
+	if force {
+		// Invalidate once, before any I/O. If this round runs out of time,
+		// ordinary retries must still verify every unvisited forced target.
+		// Displayed confirmations remain intact until a fresh result arrives.
+		clear(it.domainValues)
+		it.refreshLocked()
+	}
 	it.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, it.service.runtime.ReconcileTimeout.Duration)
 	defer cancel()
 	var failures []error
-	for i, binding := range it.cfg.Domains {
+	stale := false
+	start := it.nextDomain
+	for offset := range len(it.cfg.Domains) {
+		i := (start + offset) % len(it.cfg.Domains)
+		binding := it.cfg.Domains[i]
 		it.mu.RLock()
-		skip := !force && it.domainValues[i] == desired
+		current := it.sourceCurrentLocked(desired, revision)
+		skip := it.domainValues[i] == desired
 		hint := it.status.Domains[i].RecordID
 		it.mu.RUnlock()
+		if !current {
+			stale = true
+			break
+		}
 		if skip {
 			continue
 		}
@@ -51,9 +79,27 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 		var result dns.EnsureResult
 		err := ctx.Err()
 		if err == nil {
+			// Only an actual attempt advances the cursor. The remaining
+			// targets still receive the shared timeout below, without calls.
+			it.nextDomain = (i + 1) % len(it.cfg.Domains)
 			result, err = it.service.providers[binding.Provider].Ensure(ctx, record, hint)
 		}
 		it.mu.Lock()
+		if !it.sourceCurrentLocked(desired, revision) {
+			// The in-flight call may have changed the remote record. Even if
+			// the source returned to a previously confirmed value, recheck it.
+			it.domainValues[i] = ""
+			// Persist the invalidation alongside the last display value, so a
+			// restart with SyncOnStart=false cannot restore it as a skip cache.
+			it.status.Domains[i].LastError = it.service.errorText(errSourceChanged)
+			it.refreshLocked()
+			it.mu.Unlock()
+			if err != nil {
+				failures = append(failures, fmt.Errorf("%s/%s: %s", binding.Provider, binding.FQDN(), it.service.errorText(err)))
+			}
+			stale = true
+			break
+		}
 		status := &it.status.Domains[i]
 		if err != nil {
 			// The previous confirmed value remains visible, but a failed forced
@@ -81,24 +127,30 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 				"provider", binding.Provider, "fqdn", binding.FQDN(), "value", desired, "changed", result.Changed)
 		}
 	}
-	if it.cfg.AddressList != nil {
+	if !stale && it.cfg.AddressList != nil {
 		it.listMu.Lock()
 		it.mu.RLock()
 		// A renewal may have completed while DNS was in flight. Recheck the
 		// cache under listMu, and never overwrite a newer source revision.
 		// A successful concurrent renewal also satisfies a forced list check.
 		verified := !it.listStale && it.listValue == desired && (!force || it.listGeneration != listGeneration)
-		skip := !it.usableLocked() || revision != it.revision || verified
+		stale = !it.sourceCurrentLocked(desired, revision)
+		skip := stale || verified
 		it.mu.RUnlock()
 		if !skip {
-			if err := it.reconcileList(ctx, desired); err != nil {
+			if err := it.reconcileListRevision(ctx, desired, revision); err != nil {
+				stale = errors.Is(err, errSourceChanged)
 				failures = append(failures, fmt.Errorf("address list %s: %s", it.cfg.AddressList.List, it.service.errorText(err)))
 			}
 		}
 		it.listMu.Unlock()
 	}
 	it.mu.Lock()
-	if len(failures) == 0 && desired == it.desired && it.usableLocked() && it.syncedLocked() {
+	stale = stale || !it.sourceCurrentLocked(desired, revision)
+	if stale {
+		it.pendingForce = it.pendingForce || force
+		failures = append(failures, errSourceChanged)
+	} else if len(failures) == 0 && it.syncedLocked() {
 		it.status.LastSyncAt = it.service.now()
 	}
 	it.refreshLocked()
@@ -112,16 +164,44 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 // reconcileList requires listMu; both normal reconciliation and list-only
 // renewal hold it across the read, mutations and result publication.
 func (it *item) reconcileList(ctx context.Context, desired string) error {
+	it.mu.RLock()
+	revision := it.revision
+	current := it.sourceCurrentLocked(desired, revision)
+	it.mu.RUnlock()
+	if !current {
+		return errSourceChanged
+	}
+	return it.reconcileListRevision(ctx, desired, revision)
+}
+
+// Normal reconciliation carries its captured source revision through DNS and
+// list work. The list-only caller captures a fresh revision in reconcileList.
+func (it *item) reconcileListRevision(ctx context.Context, desired string, revision uint64) error {
 	c := it.cfg.AddressList
 	family := ros.Family(it.cfg.Source.Family)
+	if !it.sourceCurrent(desired, revision) {
+		return errSourceChanged
+	}
 	var entries []ros.ListEntry
 	err := ctx.Err()
 	if err == nil {
 		entries, err = it.service.client.ListEntries(ctx, family, c.List)
 	}
+	it.mu.Lock()
+	current := it.sourceCurrentLocked(desired, revision)
+	// Renewal may have become due while the read was in flight. Capture its
+	// request before invalidating the cache for the mutations that follow.
+	renew := it.listStale && c.Timeout != ""
+	// A stale result must not leave a former confirmation usable after an
+	// in-flight removal or add. Only a current result can clear this flag.
+	it.listStale = true
+	it.refreshLocked()
+	it.mu.Unlock()
+	if !current {
+		return errors.Join(err, errSourceChanged)
+	}
 	if err != nil {
-		it.setListResult(desired, nil, false, err, 0)
-		return err
+		return it.setListResult(desired, revision, nil, false, err, 0)
 	}
 	// ListEntries is scoped by family/list; filter again to protect against a
 	// transport returning a broader result. A missing List is allowed for clients
@@ -133,9 +213,6 @@ func (it *item) reconcileList(ctx context.Context, desired string) error {
 		}
 	}
 	entries = scoped
-	it.mu.RLock()
-	renew := it.listStale && c.Timeout != ""
-	it.mu.RUnlock()
 	present := false
 	var renewAfter time.Duration
 	var failures []error
@@ -171,6 +248,9 @@ func (it *item) reconcileList(ctx context.Context, desired string) error {
 			err = errors.New("managed stale address-list entry has no ID")
 		}
 		if err == nil {
+			if !it.sourceCurrent(desired, revision) {
+				return errors.Join(append(failures, errSourceChanged)...)
+			}
 			err = it.service.client.RemoveEntry(ctx, family, entry.ID)
 		}
 		if err != nil {
@@ -184,6 +264,9 @@ func (it *item) reconcileList(ctx context.Context, desired string) error {
 		entry := ros.ListEntry{List: c.List, Address: desired, Comment: c.Comment, Timeout: c.Timeout}
 		err := ctx.Err()
 		if err == nil {
+			if !it.sourceCurrent(desired, revision) {
+				return errSourceChanged
+			}
 			err = it.service.client.AddEntry(ctx, family, entry)
 		}
 		if err != nil {
@@ -198,8 +281,7 @@ func (it *item) reconcileList(ctx context.Context, desired string) error {
 		}
 	}
 	err = errors.Join(failures...)
-	it.setListResult(desired, visibleEntries(remaining, c.Comment, desired), true, err, renewAfter)
-	return err
+	return it.setListResult(desired, revision, visibleEntries(remaining, c.Comment, desired), true, err, renewAfter)
 }
 
 // visibleEntries shows managed entries plus any existing entry satisfying the
@@ -220,8 +302,12 @@ func visibleEntries(entries []ros.ListEntry, comment, desired string) []string {
 	return out
 }
 
-func (it *item) setListResult(desired string, entries []string, observed bool, err error, renewAfter time.Duration) {
+func (it *item) setListResult(desired string, revision uint64, entries []string, observed bool, err error, renewAfter time.Duration) error {
 	it.mu.Lock()
+	if !it.sourceCurrentLocked(desired, revision) {
+		it.mu.Unlock()
+		return errors.Join(err, errSourceChanged)
+	}
 	status := it.status.AddressList
 	if observed {
 		status.Entries = entries
@@ -253,6 +339,7 @@ func (it *item) setListResult(desired string, entries []string, observed bool, e
 	if err != nil {
 		slog.Warn("address-list reconciliation failed", "item", it.cfg.Name, "list", it.cfg.AddressList.List, "error", it.service.errorText(err))
 	}
+	return err
 }
 
 func normalizedAddress(value string) string {

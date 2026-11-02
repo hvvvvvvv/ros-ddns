@@ -30,6 +30,9 @@ type item struct {
 	persistMu sync.Mutex
 	mu        sync.RWMutex
 	status    ItemStatus
+	// nextDomain is protected by opMu. A target consuming the shared deadline
+	// must not keep later bindings from getting a turn on the next retry.
+	nextDomain int
 
 	sourceReady    bool
 	sourceValid    bool
