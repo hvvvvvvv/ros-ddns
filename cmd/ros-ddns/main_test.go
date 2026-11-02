@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/instancelock"
 	"ros-ddns/internal/pathguard"
+	"ros-ddns/internal/svcmgr"
 	"ros-ddns/internal/version"
 )
 
@@ -215,7 +217,7 @@ func TestRunRejectsPathCollisionsBeforeLockWrites(t *testing.T) {
 	}))
 	defer router.Close()
 	for _, collision := range []string{"lock-config", "lock-backup", "lock-state", "state-config", "state-backup"} {
-		for _, mode := range [][]string{{"-check"}} {
+		for _, mode := range [][]string{nil, {"-check"}} {
 			t.Run(collision+fmt.Sprint(mode), func(t *testing.T) {
 				path := writeConfig(t, commandConfig(router.URL, "127.0.0.1:8080"))
 				statePath, lockPath := filepath.Join(filepath.Dir(path), "state.json"), filepath.Join(filepath.Dir(path), "instance.lock")
@@ -262,6 +264,328 @@ func TestRunRejectsPathCollisionsBeforeLockWrites(t *testing.T) {
 	}
 }
 
+type fakeDaemonService struct {
+	fakeControlService
+	program svcmgr.Interface
+	onRun   func() error
+}
+
+func (f *fakeDaemonService) Run() error {
+	f.record("Run")
+	if f.onRun != nil {
+		return f.onRun()
+	}
+	return nil
+}
+
+func withDaemonMode(t *testing.T, serviceManaged bool) *fakeDaemonService {
+	t.Helper()
+	fake := &fakeDaemonService{}
+	interactive, newService := isInteractive, newDaemonService
+	isInteractive = func() bool { return !serviceManaged }
+	newDaemonService = func(program svcmgr.Interface, _ svcmgr.Options) (svcmgr.Service, error) {
+		fake.program = program
+		return fake, nil
+	}
+	t.Cleanup(func() {
+		isInteractive, newDaemonService = interactive, newService
+	})
+	// Restore cwd before TempDir cleanup when service startup changes it.
+	t.Chdir(t.TempDir())
+	return fake
+}
+
+func TestRunServiceRecoveryWaitsForInstanceLock(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			clearDefaultConfigEnv(t)
+			fake := withDaemonMode(t, true)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			lockPath := filepath.Join(dir, "state.json.lock")
+			args := []string{"-config", path}
+			if explicit {
+				lockPath = filepath.Join(dir, "custom.lock")
+				args = append(args, "-lock-file", "custom.lock")
+			}
+			files := map[string][]byte{
+				path: []byte("routeros: [\n"), path + ".bak": []byte("backup sentinel"),
+				filepath.Join(dir, "state.json"): []byte("state sentinel"),
+			}
+			for name, raw := range files {
+				if err := os.WriteFile(name, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lock, err := instancelock.Acquire(lockPath, instancelock.Info{PID: os.Getpid(), ConfigPath: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			files[lockPath], err = os.ReadFile(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(context.Background(), args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "another instance") {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			for name, want := range files {
+				if got, err := os.ReadFile(name); err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("contender changed %s: %q, %v", name, got, err)
+				}
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != len(files) {
+				t.Fatalf("contender added files (including quarantine): %v, %v", entries, err)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("contender started the daemon: %v", fake.calls)
+			}
+		})
+	}
+}
+
+func TestRunMissingConfigRejectsPathCollisionsWithoutWrites(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		for _, collision := range []string{"config-state", "config-default-lock", "lock-config", "lock-backup", "lock-state", "env-config", "env-backup", "env-lock"} {
+			t.Run(fmt.Sprintf("service=%t/%s", serviceManaged, collision), func(t *testing.T) {
+				clearDefaultConfigEnv(t)
+				fake := withDaemonMode(t, serviceManaged)
+				dir := filepath.Join(t.TempDir(), "missing")
+				path, statePath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.json")
+				var explicit string
+				switch collision {
+				case "config-state":
+					path = statePath
+				case "config-default-lock":
+					path = statePath + ".lock"
+				case "lock-config":
+					explicit = path
+				case "lock-backup":
+					explicit = path + ".bak"
+				case "lock-state":
+					explicit = statePath
+				case "env-config":
+					t.Setenv("ROS_DDNS_STATE_PATH", path)
+				case "env-backup":
+					t.Setenv("ROS_DDNS_STATE_PATH", path+".bak")
+				case "env-lock":
+					t.Setenv("ROS_DDNS_STATE_PATH", statePath+".lock")
+				}
+				args := []string{"-config", path}
+				if explicit != "" {
+					args = append(args, "-lock-file", explicit)
+				}
+				var stdout, stderr bytes.Buffer
+				wantCode := 2
+				if serviceManaged {
+					wantCode = 1
+				}
+				if code := run(context.Background(), args, &stdout, &stderr); code != wantCode || !strings.Contains(stderr.String(), "same file") {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("collision created files or directories: %v", err)
+				}
+				if len(fake.calls) != 0 {
+					t.Fatalf("invalid paths started the daemon: %v", fake.calls)
+				}
+			})
+		}
+	}
+}
+
+func TestRunServiceConfigCannotNameHeldLock(t *testing.T) {
+	clearDefaultConfigEnv(t)
+	fake := withDaemonMode(t, true)
+	path := filepath.Join(t.TempDir(), "state.json.lock")
+	lock, err := instancelock.Acquire(path, instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "same file") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("config recovery changed the lock: %q, %v", got, err)
+	}
+	if matches, err := filepath.Glob(path + ".invalid-*"); err != nil || len(matches) != 0 || len(fake.calls) != 0 {
+		t.Fatalf("lock file was recovered or daemon started: matches=%v calls=%v err=%v", matches, fake.calls, err)
+	}
+}
+
+func TestRunServiceFirstStartHoldsLock(t *testing.T) {
+	clearDefaultConfigEnv(t)
+	fake := withDaemonMode(t, true)
+	path := filepath.Join(t.TempDir(), "missing", "config.yaml")
+	lockPath := filepath.Join(filepath.Dir(path), "state.json.lock")
+	fake.onRun = func() error {
+		if _, err := config.Load(path); err != nil {
+			t.Fatalf("default config not ready at service start: %v", err)
+		}
+		contender, err := instancelock.Acquire(lockPath, instancelock.Info{PID: -1})
+		if contender != nil {
+			_ = contender.Close()
+		}
+		if !errors.Is(err, instancelock.ErrLocked) {
+			t.Fatalf("service started without its lock: %v", err)
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+		t.Fatalf("code=%d calls=%v stdout=%q stderr=%q", code, fake.calls, stdout.String(), stderr.String())
+	}
+	lock, err := instancelock.Acquire(lockPath, instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		t.Fatalf("startup did not release the lock on exit: %v", err)
+	}
+	defer lock.Close()
+}
+
+func TestRunRecoveryRejectsChangedLockPath(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		for _, state := range []string{"other-state.json", ""} {
+			t.Run(fmt.Sprintf("service=%t/state=%q", serviceManaged, state), func(t *testing.T) {
+				clearDefaultConfigEnv(t)
+				fake := withDaemonMode(t, serviceManaged)
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if serviceManaged {
+					if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("ROS_DDNS_STATE_PATH", state)
+				var stdout, stderr bytes.Buffer
+				wantCode := 2
+				if serviceManaged {
+					wantCode = 1
+				}
+				code := run(context.Background(), []string{"-config", path}, &stdout, &stderr)
+				if code != wantCode || !strings.Contains(stderr.String(), "changed the instance lock path") || !strings.Contains(stderr.String(), "-lock-file") {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				cfg, err := config.Load(path)
+				if err != nil {
+					t.Fatalf("first recovery should write a loadable default: %v", err)
+				}
+				wantDefault, err := defaultConfigWithStatePath(filepath.Join(filepath.Dir(path), "state.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, wantDefault) {
+					t.Fatalf("unexpected recovery output: %q, %v", got, err)
+				}
+				otherLock, err := instanceLockPath("", cfg.State.Path, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(otherLock); !os.IsNotExist(err) {
+					t.Fatalf("startup acquired a second lock: %v", err)
+				}
+				wantQuarantines := 0
+				if serviceManaged {
+					wantQuarantines = 1
+				}
+				matches, err := filepath.Glob(path + ".invalid-*")
+				if err != nil || len(matches) != wantQuarantines || len(fake.calls) != 0 {
+					t.Fatalf("repeated recovery or daemon start: matches=%v calls=%v err=%v", matches, fake.calls, err)
+				}
+				if serviceManaged {
+					if got, err := os.ReadFile(matches[0]); err != nil || string(got) != "routeros: [\n" {
+						t.Fatalf("original invalid config not preserved: %q, %v", got, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRunServiceRelativePathsUseConfigDirectory(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			clearDefaultConfigEnv(t)
+			fake := withDaemonMode(t, true)
+			dir := filepath.Join(t.TempDir(), "nested")
+			path := filepath.Join(dir, "config.yaml")
+			args := []string{"-config", path}
+			lockName := "relative-state.json.lock"
+			if missing {
+				t.Setenv("ROS_DDNS_STATE_PATH", "relative-state.json")
+				lockName = "custom.lock"
+				args = append(args, "-lock-file", lockName)
+			} else {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				raw := strings.Replace(commandConfig("https://router.invalid", "127.0.0.1:8080"), `path: ""`, `path: relative-state.json`, 1)
+				t.Setenv("W4_TEST_PASSWORD", "dummy-router-password")
+				t.Setenv("W4_TEST_API_TOKEN", "")
+				t.Setenv("W4_TEST_CA_FILE", "")
+				if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			startupDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.onRun = func() error {
+				if wd, err := os.Getwd(); err != nil || wd != dir {
+					t.Fatalf("service cwd=%q err=%v, want %q", wd, err, dir)
+				}
+				return nil
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(context.Background(), args, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+				t.Fatalf("code=%d calls=%v stdout=%q stderr=%q", code, fake.calls, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, lockName)); err != nil {
+				t.Fatalf("service lock not in configuration directory: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(startupDir, lockName)); !os.IsNotExist(err) {
+				t.Fatalf("service lock written in startup cwd: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunCheckNeverInitializesServiceOrRecoversConfig(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			fake := withDaemonMode(t, true)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if !missing {
+				if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(context.Background(), []string{"-config", path, "-check"}, &stdout, &stderr); code != 2 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if fake.program != nil {
+				t.Fatal("-check initialized the service manager")
+			}
+			entries, err := os.ReadDir(filepath.Dir(path))
+			wantEntries := 1
+			if missing {
+				wantEntries = 0
+			}
+			if err != nil || len(entries) != wantEntries {
+				t.Fatalf("-check wrote files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestRunVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	missing := filepath.Join(t.TempDir(), "missing.yaml")
@@ -288,6 +612,13 @@ func TestRunCheck(t *testing.T) {
 		if strings.Contains(stdout.String(), secret) {
 			t.Errorf("summary exposed %q", secret)
 		}
+	}
+	lockPath, err := instanceLockPath("", cfg.State.Path, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("-check created an instance lock: %v", err)
 	}
 }
 

@@ -4,7 +4,7 @@
 
 ## 1. 单实例锁
 
-两个进程同时对账可能交错修改相同 DNS / address-list，并覆盖状态缓存。守护进程会在加载配置、设置日志之后，创建任何服务或 HTTP 监听之前取得单实例锁。`-version` 不加载配置；`-check` 只加载、校验并输出摘要，不获取锁，也不验证锁或状态目录可写性。
+两个进程同时对账可能交错修改相同 DNS / address-list，并覆盖状态缓存。守护进程先只读探测配置并检查配置、备份、状态和候选锁的文件身份，再取得单实例锁；生成默认配置、隔离无法加载的配置及后续保存都在持锁期间执行。恢复后重新加载配置、复核路径与锁，再创建同步服务和 HTTP 监听。`-version` 不加载配置；`-check` 只加载、校验并输出摘要，不获取锁、不生成或恢复配置，也不读取 CA 内容或验证锁、状态目录可写性。
 
 锁路径按以下顺序选择：
 
@@ -12,7 +12,9 @@
 2. 否则使用启动配置的 `state.path + ".lock"`；例如默认 `./data/state.json.lock`。
 3. 若 `state.path` 为空，使用 `filepath.Join(os.TempDir(), "ros-ddns-" + hex(SHA256(规范配置路径)的前8字节) + ".lock")`，即 16 个小写十六进制字符。配置路径转为绝对路径并解析符号链接，Windows 统一大小写，Unix 保留大小写；相对 / 绝对写法和符号链接别名使用同一锁。不按配置内容散列；临时目录取决于进程环境。
 
-配置文件、`配置路径 + ".bak"`、非空 `state.path` 和有效锁路径必须互不重合。启动及 `-check` 在任何写入或锁文件截断之前检查文件身份，拒绝相对路径、符号链接、现有硬链接以及 Windows 大小写别名造成的冲突，返回退出码 `2`；尚不存在的目标会解析已有父目录，不创建文件。WebUI 校验及保存也检查当前锁路径，冲突保存返回 `422`。该检查不防止外部进程在检查后更换链接或文件，应避免并发修改这些路径。
+配置缺失或无法加载时，未指定 `-lock-file` 的启动先使用配置目录下的 `state.json.lock` 作为候选锁。恢复默认配置后，若有效锁路径与已持有的锁不同（例如 `ROS_DDNS_STATE_PATH` 覆盖了默认状态路径），本次启动报错并退出，不换锁重试，也不再次改写配置；应使用 `-lock-file` 固定所有实例共同使用的锁路径后再启动。
+
+配置文件、`配置路径 + ".bak"`、非空 `state.path` 和有效锁路径必须互不重合。启动及 `-check` 在任何写入或锁文件截断之前检查文件身份，拒绝相对路径、符号链接、现有硬链接以及 Windows 大小写别名造成的冲突；交互式配置错误返回退出码 `2`，服务模式启动失败返回 `1`。尚不存在的目标会解析已有父目录，不创建文件。WebUI 校验及保存也检查当前锁路径，冲突保存返回 `422`。该检查不防止外部进程在检查后更换链接或文件，应避免并发修改这些路径。
 
 没有 YAML 锁字段，空的 `-lock-file` 表示使用默认规则，不能关闭互斥。Windows 使用 `LockFileEx` 的非阻塞独占锁，Unix 使用 `flock(LOCK_EX | LOCK_NB)`，不是靠 PID 或文件是否存在判断。Windows 锁定 EOF 之外的一个字节，使诊断 JSON 仍可被其他进程读取；不会因此扩展文件。
 
@@ -49,19 +51,22 @@ ARM64 主机应改为 `GOARCH=arm64` 并使用相应输出名。Windows 可直�
 
 ### 2.2 准备账号、目录、二进制与配置
 
-Linux 示例（无 systemd 建账号需求时可使用现有服务账号；`ros-ddns` 为推荐名）：
+Linux 示例（无 systemd 建账号需求时可使用现有服务账号；`ros-ddns` 为推荐名）。命令块在子 shell 中运行，任一步失败即停止：
 
 ```bash
-sudo groupadd --system ros-ddns 2>/dev/null || true
-sudo useradd --system --gid ros-ddns --home-dir /var/lib/ros-ddns \
-  --no-create-home --shell /usr/sbin/nologin ros-ddns 2>/dev/null || true
+(
+set -e
+getent group ros-ddns >/dev/null || sudo groupadd --system ros-ddns
+id -u ros-ddns >/dev/null 2>&1 || sudo useradd --system --gid ros-ddns --home-dir /var/lib/ros-ddns \
+  --no-create-home --shell /usr/sbin/nologin ros-ddns
 sudo install -d -o ros-ddns -g ros-ddns -m 0700 /var/lib/ros-ddns
 sudo install -d -o root -g root -m 0755 /usr/local/bin
 
 # 用临时文件 + rename 替换，避免截断正在运行的二进制
-tmp=$(mktemp /usr/local/bin/.ros-ddns.install.XXXXXX)
+tmp=$(sudo mktemp /usr/local/bin/.ros-ddns.install.XXXXXX)
 sudo install -o root -g root -m 0755 build/bin/ros-ddns-linux-amd64 "$tmp"
 sudo mv -f "$tmp" /usr/local/bin/ros-ddns
+)
 ```
 
 配置文件是可选的：首次守护进程启动（手动或服务方式）会自动生成内嵌默认配置（`0600`，父目录 `0700`）。模板中所有字符串字段都带 `${VAR:-默认值}` 环境引用，可先导出变量再启动，也可以启动一次后编辑生成的文件或使用 WebUI：
@@ -114,12 +119,15 @@ curl -sS -i http://127.0.0.1:8080/readyz
 先备份配置、`.bak`、状态与 CA 文件，并保留旧二进制：
 
 ```bash
+(
+set -e
 sudo cp -p /usr/local/bin/ros-ddns /usr/local/bin/ros-ddns.previous
-tmp=$(mktemp /usr/local/bin/.ros-ddns.install.XXXXXX)
+tmp=$(sudo mktemp /usr/local/bin/.ros-ddns.install.XXXXXX)
 sudo install -o root -g root -m 0755 build/bin/ros-ddns-linux-amd64 "$tmp"
 sudo mv -f "$tmp" /usr/local/bin/ros-ddns
 sudo /usr/local/bin/ros-ddns -service restart
 sudo /usr/local/bin/ros-ddns -service status
+)
 ```
 
 确认版本、日志、探针和实际目标后再清理旧版本。unit 由库按安装时的参数生成，升级二进制不需要改 unit；若使用了 2.6 的加固 drop-in，需要自行保留。回滚时恢复旧二进制并 `-service restart`，必要时恢复兼容的配置 / 状态。单个 `.bak` 是最近一次 WebUI 保存备份，不是完整的发布回滚历史；本地回滚不会撤销已经发生的远端 DNS / 列表修改。
@@ -134,7 +142,7 @@ sudo /usr/local/bin/ros-ddns -service uninstall
 
 ### 2.6 可选 systemd 加固
 
-库生成的默认 unit 只含启动所需字段。需要旧安装脚本那套加固时，创建 drop-in 即可（不要直接编辑生成的文件）：
+库生成的默认 unit 只含启动所需字段，不自带 `ReadWritePaths`。需要旧安装脚本那套加固时，创建 drop-in 即可（不要直接编辑生成的文件）：
 
 ```bash
 sudo mkdir -p /etc/systemd/system/ros-ddns.service.d
@@ -144,6 +152,7 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+ReadWritePaths=/var/lib/ros-ddns
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -157,7 +166,7 @@ sudo systemctl daemon-reload
 sudo /usr/local/bin/ros-ddns -service restart
 ```
 
-`ProtectSystem=strict` 会使配置目录之外不可写：保持 `WorkingDirectory` 为配置目录（安装时会写入），并把状态 / CA 文件放在该目录内。卸载服务不会删除 drop-in 目录，需要手动清理。
+启用 `ProtectSystem=strict` 后，配置目录同样受只读限制，需要通过 `ReadWritePaths` 显式放行写入目录。`WorkingDirectory` 只决定相对路径的基准，不会授予写权限；例外目录必须按 2.2 预先创建，并允许服务用户写入，`ReadWritePaths` 本身不会创建目录或改变文件权限。配置、`.bak`、状态与锁文件都应位于可写例外中，其父目录也需要可写以支持临时文件和 rename；修改这些路径时须同步调整例外。CA 文件只需服务用户可读，可以放在可写例外之外。卸载服务不会删除 drop-in 目录，需要手动清理。
 
 ## 3. Docker Compose
 

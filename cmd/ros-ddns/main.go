@@ -35,6 +35,9 @@ import (
 // OS service manager. Tests replace it to exercise the service-managed startup.
 var isInteractive = svcmgr.Interactive
 
+// newDaemonService lets startup tests avoid the real service manager/event log.
+var newDaemonService = svcmgr.New
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -81,11 +84,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
-	// Every daemon start, whether from a console or from the OS service manager,
-	// must come up even when the configuration cannot be loaded: a default
-	// configuration is generated first. -check stays side-effect free and keeps
-	// its strict validation semantics.
-	serviceManaged := !isInteractive()
+	// Daemon configuration recovery runs only after path validation and locking.
+	// -check remains read-only and does not initialize the service manager.
+	serviceManaged := !*check && !isInteractive()
 	activeConfigPath := *configPath
 	absConfigPath, err := filepath.Abs(activeConfigPath)
 	if err != nil {
@@ -100,7 +101,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	)
 	if serviceManaged {
 		program = &serviceProgram{}
-		serviceHandle, err = svcmgr.New(program, svcmgr.Options{})
+		serviceHandle, err = newDaemonService(program, svcmgr.Options{})
 		if err != nil {
 			fmt.Fprintf(stderr, "ros-ddns: initialize service manager: %v\n", err)
 			return 1
@@ -112,6 +113,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var (
 		cfg      *config.Config
 		recovery *configRecovery
+		lock     *instancelock.Lock
+		lockPath string
 	)
 	if *check {
 		cfg, err = config.Load(activeConfigPath)
@@ -120,30 +123,54 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	} else {
-		cfg, recovery, err = prepareDaemonConfig(absConfigPath, serviceManaged)
+		activeConfigPath = absConfigPath
+		lockPath, err = daemonConfigLockPath(absConfigPath, *lockFile, serviceManaged)
+		if err != nil {
+			if serviceManaged {
+				return serviceFatal(serviceLogger, stderr, "configuration paths: %v", err)
+			}
+			fmt.Fprintf(stderr, "ros-ddns: %v\n", err)
+			return 2
+		}
+		// Hold the same lock through configuration recovery and the entire run,
+		// even if state.path is later reloaded.
+		lock, err = instancelock.Acquire(lockPath, instancelock.Info{
+			PID: os.Getpid(), StartedAt: time.Now().UTC(), ConfigPath: absConfigPath, Version: version.Version,
+		})
+		if err != nil {
+			return serviceFatal(serviceLogger, stderr, "acquire single-instance lock: %v", err)
+		}
+		defer func() {
+			if err := lock.Close(); err != nil {
+				fmt.Fprintf(stderr, "ros-ddns: release single-instance lock: %v\n", err)
+			}
+		}()
+		cfg, recovery, err = prepareDaemonConfig(absConfigPath, serviceManaged, lock)
 		if err != nil {
 			if serviceManaged {
 				return serviceFatal(serviceLogger, stderr, "%v", err)
 			}
 			fmt.Fprintf(stderr, "ros-ddns: %v\n", err)
-			// An existing but unloadable configuration is a configuration
-			// error; a failure to create the default is a startup error.
-			if _, statErr := os.Stat(absConfigPath); statErr == nil {
-				return 2
+			if errors.Is(err, errPrepareDefaultConfig) {
+				return 1
 			}
-			return 1
+			return 2
 		}
-		activeConfigPath = absConfigPath
 	}
 
-	absConfigPath, err = filepath.Abs(activeConfigPath)
-	if err != nil {
-		fmt.Fprintln(stderr, "ros-ddns: cannot resolve config path")
-		return 2
-	}
-	lockPath, err := instanceLockPath(*lockFile, cfg.State.Path, activeConfigPath)
+	effectiveLockPath, err := instanceLockPath(*lockFile, cfg.State.Path, activeConfigPath)
 	if err == nil {
-		err = pathguard.Validate(activeConfigPath, cfg.State.Path, lockPath)
+		err = pathguard.Validate(activeConfigPath, cfg.State.Path, effectiveLockPath)
+	}
+	if err == nil && lock != nil {
+		var held, effective string
+		held, err = pathguard.Canonical(lock.Path())
+		if err == nil {
+			effective, err = pathguard.Canonical(effectiveLockPath)
+		}
+		if err == nil && held != effective {
+			err = errors.New("configuration changed the instance lock path; restart with an explicit -lock-file to select a stable lock")
+		}
 	}
 	if err != nil {
 		if serviceManaged {
@@ -183,23 +210,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// The daemon mutates remote targets, so it must hold the single-instance
-	// lock for the entire run, even if state.path is reloaded.
-	lock, err := instancelock.Acquire(lockPath, instancelock.Info{
-		PID: os.Getpid(), StartedAt: time.Now().UTC(), ConfigPath: absConfigPath, Version: version.Version,
-	})
-	if err != nil {
-		slog.Error("acquire single-instance lock", "error", err)
-		if serviceLogger != nil {
-			_ = serviceLogger.Error("acquire single-instance lock: " + err.Error())
-		}
-		return 1
-	}
-	defer func() {
-		if err := lock.Close(); err != nil {
-			slog.Warn("release single-instance lock", "path", lock.Path(), "error", err)
-		}
-	}()
 	slog.Info("acquired single-instance lock", "path", lock.Path())
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

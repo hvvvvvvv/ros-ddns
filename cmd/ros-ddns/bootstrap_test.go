@@ -11,7 +11,22 @@ import (
 	"time"
 
 	"ros-ddns/internal/config"
+	"ros-ddns/internal/instancelock"
 )
+
+func prepareTestDaemonConfig(t *testing.T, path string, serviceManaged bool) (*config.Config, *configRecovery, error) {
+	t.Helper()
+	lockPath, err := daemonConfigLockPath(path, "", serviceManaged)
+	if err != nil {
+		return nil, nil, err
+	}
+	lock, err := instancelock.Acquire(lockPath, instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer lock.Close()
+	return prepareDaemonConfig(path, serviceManaged, lock)
+}
 
 func clearDefaultConfigEnv(t *testing.T) {
 	t.Helper()
@@ -174,7 +189,7 @@ func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(original) })
 
-	cfg, recovery, err := prepareDaemonConfig(path, false)
+	cfg, recovery, err := prepareTestDaemonConfig(t, path, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +218,7 @@ func TestPrepareDaemonConfigServiceModeChangesWorkingDirectory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(original) })
 
-	if _, _, err := prepareDaemonConfig(path, true); err != nil {
+	if _, _, err := prepareTestDaemonConfig(t, path, true); err != nil {
 		t.Fatal(err)
 	}
 	if wd, err := os.Getwd(); err != nil || wd != dir {
@@ -223,7 +238,7 @@ func TestPrepareDaemonConfigInteractiveRejectsInvalidConfiguration(t *testing.T)
 	}
 	t.Cleanup(func() { _ = os.Chdir(original) })
 
-	if _, _, err := prepareDaemonConfig(path, false); err == nil {
+	if _, _, err := prepareTestDaemonConfig(t, path, false); err == nil {
 		t.Fatal("interactive daemon start must not replace an unloadable configuration")
 	}
 	raw, err := os.ReadFile(path)
@@ -251,7 +266,7 @@ func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testin
 	}
 	t.Cleanup(func() { _ = os.Chdir(original) })
 
-	cfg, recovery, err := prepareDaemonConfig(path, true)
+	cfg, recovery, err := prepareTestDaemonConfig(t, path, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,5 +278,74 @@ func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testin
 	}
 	if cfg == nil || len(cfg.Items) != 1 {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestPrepareDaemonConfigRequiresLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "config.yaml")
+	if _, _, err := prepareDaemonConfig(path, false, nil); err == nil {
+		t.Fatal("configuration recovery accepted a missing instance lock")
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatalf("configuration recovery created a directory without a lock: %v", err)
+	}
+}
+
+func TestPrepareDaemonConfigRechecksRecoveryPathsUnderLock(t *testing.T) {
+	clearDefaultConfigEnv(t)
+	path := writeConfig(t, commandConfig("https://router.invalid", "127.0.0.1:8080"))
+	t.Chdir(t.TempDir())
+	lockPath := filepath.Join(filepath.Dir(path), "instance.lock")
+	// This variable does not affect the existing config, but will affect the
+	// default if that config becomes unloadable after the initial read.
+	t.Setenv("ROS_DDNS_STATE_PATH", lockPath)
+	selected, err := daemonConfigLockPath(path, lockPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := instancelock.Acquire(selected, instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	broken := []byte("routeros: [\n")
+	if err := os.WriteFile(path, broken, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepareDaemonConfig(path, true, lock); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Fatalf("recovery under a conflicting held lock: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, broken) {
+		t.Fatalf("recovery changed the config: %q, %v", got, err)
+	}
+	if matches, err := filepath.Glob(path + ".invalid-*"); err != nil || len(matches) != 0 {
+		t.Fatalf("recovery quarantined the config: %v, %v", matches, err)
+	}
+}
+
+func TestDaemonConfigLockPathPreservesSymlinkTraversal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink/.. traversal follows different Windows path semantics")
+	}
+	clearDefaultConfigEnv(t)
+	base := t.TempDir()
+	dir, target := filepath.Join(base, "service"), filepath.Join(base, "target", "nested")
+	for _, name := range []string{dir, target} {
+		if err := os.MkdirAll(name, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(base)
+	path := filepath.Join(dir, "config.yaml")
+	got, err := daemonConfigLockPath(path, "link/../instance.lock", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(base, "target", "instance.lock")
+	if got != want {
+		t.Fatalf("lock path = %q, want symlink-resolved %q", got, want)
 	}
 }
