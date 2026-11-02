@@ -36,6 +36,8 @@ docker compose up -d --build
 
 打开 <http://127.0.0.1:8080/>，用 WebUI 查看状态、继续配置。Linux 下容器以 `10001` 用户运行，`data/` 必须允许该用户写入：`sudo chown 10001:10001 data`。首次启动生成的 `data/config.yaml` 属主同样是 `10001`。
 
+> `docker compose up -d --build` 不会自动读取 git tag，镜像默认显示 `dev` 版本；需要版本可追溯时，先按 [部署指南 §3.2](docs/deployment.md#32-构建校验与运行) 导出 `VERSION` / `COMMIT` / `BUILD_DATE` 再构建。
+
 ### 从源码运行
 
 需要 Go 1.26.10 或更高版本（Go 1.21+ 会按 `go.mod` 的 `go` 要求自动下载匹配工具链）。

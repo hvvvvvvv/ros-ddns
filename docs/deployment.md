@@ -201,9 +201,18 @@ sudo chmod 700 data
 ### 3.2 构建、校验与运行
 
 ```bash
+# 1) 基础构建：不注入版本，镜像内 -version / WebUI 显示 dev
 docker compose config --quiet
 docker compose build
 docker compose up -d
+
+# 2) 需要标准版本号时：先从 git 计算元数据，再构建并用现有镜像启动
+VERSION=$(git describe --tags --always --dirty) \
+COMMIT=$(git rev-parse --short HEAD) \
+BUILD_DATE=$(git log -1 --format=%cI) \
+docker compose build
+docker compose up -d --no-build
+
 docker compose ps
 docker compose logs --tail=100 -f ros-ddns
 # 首次启动生成 data/config.yaml 后可做静态校验
@@ -211,6 +220,8 @@ docker compose run --rm --no-deps ros-ddns -config /data/config.yaml -check
 curl -fsS http://${ROS_DDNS_HTTP_BIND:-127.0.0.1:8080}/healthz
 curl -sS -i http://${ROS_DDNS_HTTP_BIND:-127.0.0.1:8080}/readyz
 ```
+
+`docker compose up -d --build` 会以 Compose 文件中的默认值（`dev` / `unknown` / `unknown`）重建并覆盖现有镜像，不会自动读取 git tag；只有显式导出上面三个变量（或作为一次性环境变量传给命令）时镜像才带标准版本。Windows PowerShell 可用 `$env:VERSION = "$(git describe --tags --always --dirty)"`、`$env:COMMIT = "$(git rev-parse --short HEAD)"`、`$env:BUILD_DATE = "$(git log -1 --format=%cI)"` 设置后再执行 compose 命令。
 
 Compose 每 30 秒通过容器内 `wget` 请求 `healthz`，超时 5 秒，启动宽限 15 秒，连续 3 次失败标记 unhealthy。Docker 的 `unless-stopped` 处理进程退出，**不会仅因 unhealthy 自动重启**；需由运维监控处理。healthcheck 只证明 HTTP 存活，不证明实际 DNS 写入。容器内程序按前台模式运行：首次启动会在 `/data/config.yaml` 生成配置，`.env` 中带默认值的环境引用提供凭据、监听地址和 token；若 `.env` 未设置 `ROS_DDNS_LISTEN`，生成的默认监听为 `127.0.0.1:8080`，宿主机发布端口无法访问 WebUI。
 
@@ -226,12 +237,15 @@ WebUI 地址是 `http://127.0.0.1:8080/`。配置保存更新宿主机 `data/con
 
 ```bash
 docker image tag ros-ddns:local ros-ddns:previous
+VERSION=$(git describe --tags --always --dirty) \
+COMMIT=$(git rev-parse --short HEAD) \
+BUILD_DATE=$(git log -1 --format=%cI) \
 docker compose build --pull
 docker compose up -d --force-recreate
 docker compose logs --tail=100 ros-ddns
 ```
 
-检查版本、探针、WebUI 与目标结果。需回滚时先 `docker compose down`，将 `ros-ddns:previous` 重新标记为 `ros-ddns:local`，恢复必要的兼容配置 / 状态，再 `docker compose up -d --no-build`；回滚过程中不要重建覆盖旧镜像。不要用 `.bak` 代替独立的发布备份。
+不注入上述变量时，升级后的镜像会显示 `dev` / `unknown` 版本；需要版本可追溯时保留命令前的变量赋值。检查版本、探针、WebUI 与目标结果。需回滚时先 `docker compose down`，将 `ros-ddns:previous` 重新标记为 `ros-ddns:local`，恢复必要的兼容配置 / 状态，再 `docker compose up -d --no-build`；回滚过程中不要重建覆盖旧镜像。不要用 `.bak` 代替独立的发布备份。
 
 正常下线使用 `docker compose down`，它保留 bind mount 的 data 与 `.env`；即使 `down -v` 也不会清理这个宿主机目录。确认所有进程已停止、备份完成且无需恢复后，再手动删除 data、`.env` 和不再使用的镜像。注意本地数据清理不会撤销远端变更。
 
