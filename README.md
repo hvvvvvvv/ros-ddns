@@ -145,7 +145,6 @@ curl -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Authorization
 
 ## 文档
 
-- [贡献指南](CONTRIBUTING.md)：本地开发、构建测试、目录约定与验收要求。
 - [生产部署指南](docs/deployment.md)：单实例锁、systemd / Windows 服务、Docker、升级与回滚。
 - [WebUI 使用指南](docs/webui.md)：页面操作、配置热重载、HTTP API、实时日志与通知。
 - [配置参考](docs/configuration.md)：完整字段、默认值、环境变量展开与校验规则。

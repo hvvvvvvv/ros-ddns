@@ -230,5 +230,3 @@ docker compose logs --tail=100 ros-ddns
 - 正常停止后可再启动，历史锁文件无需删除；更改状态路径时安排完整停启。
 - 在服务器分别验证服务安装与可选加固 drop-in、Docker bind mount / healthcheck、日志和 20 秒停止窗口。
 - 在专用测试目标验证 RouterOS 与 DNS 读写、续期、故障恢复、升级及回滚。`-check` 只做静态校验，不验证阿里云权限或真实 DNS 写入，本地单元测试也不替代这一步。
-
-历史验收记录（部署与 WebUI，含 dry-run 时期）与验收约定见 [贡献指南](../CONTRIBUTING.md#历史验收记录)。

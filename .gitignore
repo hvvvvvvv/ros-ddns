@@ -18,3 +18,6 @@ coverage.*
 .env
 .env.*
 !.env.example
+
+# Local project-specific agent conventions (not distributed with the repo)
+/AGENTS.md

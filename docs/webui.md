@@ -208,7 +208,7 @@ Manager 串行处理保存：比对 `baseHash`、校验配置及文件路径冲�
 
 ## 6. 验证与验收
 
-本地测试命令、验收约定与历史验收记录见 [贡献指南](../CONTRIBUTING.md#验证与验收)。
+本地构建 / 测试命令见 [README](../README.md)；真实环境验收清单见 [RouterOS 指南](routeros-setup.md#8-手工端到端验证清单) 与 [阿里云指南](aliyun-setup.md#9-手工端到端验证清单)。
 
 ## 7. 限制与范围
 
