@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,11 +27,39 @@ func TestRoundTripAndIndependentCopies(t *testing.T) {
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	want := Item{
 		SourceKey: "source", SourceAddress: "2001:db8::1/64", RecordValue: "2001:db8::1",
-		SourceObservedAt: now, ValueSince: now, DesiredValue: "2001:db8::1", DesiredSince: now, LastSyncAt: now,
+		SourceObservedAt: now, DesiredValue: "2001:db8::1", LastSyncAt: now,
 		Domains:     map[string]Domain{"binding": {RecordID: "id-1", Value: "2001:db8::1", TTL: 600, UpdatedAt: now, LastError: "retry me"}},
 		AddressList: &AddressList{Family: "ipv6", List: "hosts", Comment: "ros-ddns:home", Timeout: "1h", Value: "2001:db8::1", Entries: []string{"2001:db8::1"}, UpdatedAt: now},
 	}
 	if err := s.Put("home", want); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Version int                                   `json:"version"`
+		Items   map[string]map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version != 1 {
+		t.Fatalf("cache version = %d, want 1", legacy.Version)
+	}
+	// Older version-1 files include stability metadata that is no longer used.
+	for _, field := range []string{"valueSince", "desiredSince"} {
+		if _, ok := legacy.Items["home"][field]; ok {
+			t.Fatalf("persisted unused field %q", field)
+		}
+		legacy.Items["home"][field] = json.RawMessage(`"2026-10-31T12:00:00Z"`)
+	}
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := Open(path)
@@ -54,6 +83,13 @@ func TestRoundTripAndIndependentCopies(t *testing.T) {
 	// Replacing an existing file must work, including on Windows.
 	if err := reopened.Put("other", Item{}); err != nil {
 		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"valueSince"`)) || bytes.Contains(data, []byte(`"desiredSince"`)) {
+		t.Fatal("rewriting a legacy cache retained unused stability metadata")
 	}
 	again, err := Open(path)
 	if err != nil {

@@ -42,7 +42,6 @@ type item struct {
 	candidate      string
 	valueSince     time.Time
 	desired        string
-	desiredSince   time.Time
 	revision       uint64 // advances even if a value changes away and back in flight
 	domainValues   []string
 	domainTTLs     []int // last confirmed TTL, distinct from the configured/status TTL
@@ -67,7 +66,7 @@ func newItem(s *Service, c config.ItemConfig) *item {
 			it.status.RecordValue = cached.RecordValue
 			it.status.SourceObservedAt = cached.SourceObservedAt
 			it.status.LastSyncAt = cached.LastSyncAt
-			it.desired, it.desiredSince = cached.DesiredValue, cached.DesiredSince
+			it.desired = cached.DesiredValue
 		}
 		for i, d := range c.Domains {
 			if previous, ok := cached.Domains[bindingKey(c.Source.Family, d)]; ok {
@@ -199,7 +198,7 @@ func (it *item) observe(addrs []ros.Address, pollErr error, observed, nextPoll t
 	}
 	changed := false
 	if value != it.desired && observed.Sub(it.valueSince) >= it.service.runtime.StableFor.Duration {
-		it.desired, it.desiredSince, changed = value, observed, true
+		it.desired, changed = value, true
 		it.revision++
 	}
 	usable := it.usableLocked()
@@ -389,8 +388,8 @@ func (it *item) persist() error {
 	it.mu.RLock()
 	cached := state.Item{
 		SourceKey: it.key, SourceAddress: it.status.SourceAddress, RecordValue: it.status.RecordValue,
-		SourceObservedAt: it.status.SourceObservedAt, ValueSince: it.valueSince,
-		DesiredValue: it.desired, DesiredSince: it.desiredSince, LastSyncAt: it.status.LastSyncAt,
+		SourceObservedAt: it.status.SourceObservedAt,
+		DesiredValue:     it.desired, LastSyncAt: it.status.LastSyncAt,
 		Domains: make(map[string]state.Domain, len(it.cfg.Domains)),
 	}
 	for i, d := range it.cfg.Domains {

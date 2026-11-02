@@ -20,9 +20,7 @@ type Item struct {
 	SourceAddress    string            `json:"sourceAddress,omitempty"`
 	RecordValue      string            `json:"recordValue,omitempty"`
 	SourceObservedAt time.Time         `json:"sourceObservedAt,omitempty"`
-	ValueSince       time.Time         `json:"valueSince,omitempty"`
 	DesiredValue     string            `json:"desiredValue,omitempty"`
-	DesiredSince     time.Time         `json:"desiredSince,omitempty"`
 	LastSyncAt       time.Time         `json:"lastSyncAt,omitempty"`
 	Domains          map[string]Domain `json:"domains"`
 	AddressList      *AddressList      `json:"addressList,omitempty"`
