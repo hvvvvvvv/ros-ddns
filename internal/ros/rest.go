@@ -91,10 +91,42 @@ func newRESTClient(cfg config.RouterOSConfig) (Client, error) {
 		username: cfg.Username,
 		password: cfg.Password,
 		httpClient: &http.Client{
-			Transport: transport,
+			Transport: &noRedirectTransport{transport},
 			Timeout:   cfg.Timeout.Duration,
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				return redirectAPIError(req.Response)
+			},
 		},
 	}, nil
+}
+
+type noRedirectTransport struct{ *http.Transport }
+
+func (t *noRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.Transport.RoundTrip(req)
+	if err == nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// net/http parses Location before CheckRedirect. Reject at the transport
+		// boundary as well so malformed locations cannot leak through parse errors.
+		resp.Body.Close()
+		return nil, redirectAPIError(resp)
+	}
+	return resp, err
+}
+
+func redirectAPIError(resp *http.Response) *APIError {
+	location := "<missing>"
+	if resp.Header.Get("Location") != "" {
+		location = "<invalid>"
+		if target, err := resp.Location(); err == nil && target.Opaque == "" && (target.Scheme == "http" || target.Scheme == "https") {
+			// Location may contain credentials or signed query parameters. Never
+			// include those, or the redirect response body, in an error.
+			target.User = nil
+			target.RawQuery, target.Fragment, target.RawFragment = "", "", ""
+			target.ForceQuery = false
+			location = target.String()
+		}
+	}
+	return &APIError{StatusCode: resp.StatusCode, Message: "redirect refused", Detail: fmt.Sprintf("Location: %q", location)}
 }
 
 type addressDTO struct {
@@ -262,7 +294,17 @@ func (c *restClient) request(ctx context.Context, method, resource string, query
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.httpClient.Do(req)
+	if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		resp.Body.Close()
+		// CheckRedirect errors are wrapped in a url.Error containing the raw
+		// Location. Return only our sanitized error, also for 3xx without Location.
+		return fmt.Errorf("RouterOS %s %s: %w", method, resource, redirectAPIError(resp))
+	}
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode >= 300 && apiErr.StatusCode < 400 {
+			err = apiErr // Discard url.Error's potentially credential-bearing URL.
+		}
 		return fmt.Errorf("RouterOS %s %s: %w", method, resource, err)
 	}
 	defer resp.Body.Close()

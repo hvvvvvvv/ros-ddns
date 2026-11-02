@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -259,6 +260,94 @@ func TestRESTClientRemoveEntry(t *testing.T) {
 				t.Fatalf("RemoveEntry error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestRESTClientRejectsWriteRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		status          int
+		noLocation      bool
+		invalidLocation bool
+	}{
+		{"301", http.StatusMovedPermanently, false, false},
+		{"302", http.StatusFound, false, false},
+		{"303", http.StatusSeeOther, false, false},
+		{"307", http.StatusTemporaryRedirect, false, false},
+		{"308", http.StatusPermanentRedirect, false, false},
+		{"302 without Location", http.StatusFound, true, false},
+		{"302 malformed Location", http.StatusFound, false, true},
+		{"304", http.StatusNotModified, true, false},
+	} {
+		for _, method := range []string{http.MethodPut, http.MethodDelete} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				var requests, redirected atomic.Int64
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/redirected" {
+						redirected.Add(1)
+						w.WriteHeader(http.StatusOK) // Would falsely report a successful write.
+						return
+					}
+					requests.Add(1)
+					path := "/rest/ip/firewall/address-list"
+					if method == http.MethodDelete {
+						path += "/*1"
+					}
+					checkRESTRequest(t, r, method, path, nil)
+					if !tc.noLocation {
+						path := "/redirected"
+						if tc.invalidLocation {
+							path = "/%zz"
+						}
+						w.Header().Set("Location", "http://redirect-user:redirect-password@"+r.Host+path+"?token=query-secret#fragment-secret")
+					}
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, "body-secret")
+				}))
+				t.Cleanup(server.Close)
+				client := testRESTClient(t, server.URL)
+				var err error
+				if method == http.MethodPut {
+					err = client.AddEntry(context.Background(), IPv4, ListEntry{List: "home", Address: "203.0.113.42"})
+				} else {
+					err = client.RemoveEntry(context.Background(), IPv4, "*1")
+				}
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status || !strings.Contains(err.Error(), "redirect refused") {
+					t.Fatalf("error = %v, want visible HTTP %d redirect failure", err, tc.status)
+				}
+				if requests.Load() != 1 || redirected.Load() != 0 {
+					t.Fatalf("requests = %d, redirected = %d; want 1, 0", requests.Load(), redirected.Load())
+				}
+				if !tc.noLocation && !tc.invalidLocation && !strings.Contains(err.Error(), server.URL+"/redirected") {
+					t.Fatalf("error lacks sanitized Location: %v", err)
+				}
+				for _, secret := range []string{"ddns-api", "p:a ss&word", "redirect-user", "redirect-password", "query-secret", "fragment-secret", "body-secret"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatalf("redirect error leaked %q: %v", secret, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRESTClientRejectsHTTPSDowngrade(t *testing.T) {
+	var redirected atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(source.Close)
+	client := testRESTClient(t, source.URL, func(cfg *config.RouterOSConfig) { cfg.TLS.InsecureSkipVerify = true })
+	err := client.AddEntry(context.Background(), IPv4, ListEntry{List: "home", Address: "203.0.113.42"})
+	if err == nil || redirected.Load() != 0 {
+		t.Fatalf("downgrade error = %v, target requests = %d", err, redirected.Load())
 	}
 }
 
