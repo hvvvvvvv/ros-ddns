@@ -19,11 +19,6 @@ func clearDefaultConfigEnv(t *testing.T) {
 		"ROS_DDNS_ROUTEROS_USERNAME",
 		"ROS_PASSWORD",
 		"ROS_DDNS_CA_FILE",
-		"ALI_ACCESS_KEY_ID",
-		"ALI_ACCESS_KEY_SECRET",
-		"ALI_SECURITY_TOKEN",
-		"ROS_DDNS_INTERFACE",
-		"ROS_DDNS_DOMAIN",
 		"ROS_DDNS_LOG_LEVEL",
 		"ROS_DDNS_LOG_FORMAT",
 		"ROS_DDNS_POLL_INTERVAL",
@@ -64,20 +59,16 @@ func TestDefaultConfigYAML(t *testing.T) {
 	if len(references) != bytes.Count(raw, []byte("${")) {
 		t.Fatalf("default configuration contains an environment reference without a fallback:\n%s", raw)
 	}
+	if regexp.MustCompile(`(?m)^(dns|items):`).Match(raw) {
+		t.Fatal("default configuration must omit the dns and items sections")
+	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	cfg, err := Parse(raw, path)
 	if err != nil {
 		t.Fatalf("parse default configuration: %v\n%s", err, raw)
 	}
-	if len(cfg.Items) != 1 || len(cfg.DNS.Providers) != 1 {
-		t.Fatalf("items=%d providers=%d, want 1 and 1", len(cfg.Items), len(cfg.DNS.Providers))
-	}
-	provider, ok := cfg.DNS.Providers["ali-main"]
-	if !ok {
-		t.Fatal("default provider ali-main is missing")
-	}
-	if len(cfg.Items[0].Domains) != 1 {
-		t.Fatalf("item domains=%d, want 1", len(cfg.Items[0].Domains))
+	if len(cfg.Items) != 0 || len(cfg.DNS.Providers) != 0 {
+		t.Fatalf("items=%d providers=%d, want 0 and 0", len(cfg.Items), len(cfg.DNS.Providers))
 	}
 	for _, field := range []struct{ name, got, want string }{
 		{"api.listen", cfg.API.Listen, "127.0.0.1:8080"},
@@ -87,11 +78,6 @@ func TestDefaultConfigYAML(t *testing.T) {
 		{"routeros.username", cfg.RouterOS.Username, "admin"},
 		{"routeros.password", cfg.RouterOS.Password, ""},
 		{"routeros.tls.caFile", cfg.RouterOS.TLS.CAFile, ""},
-		{"provider.accessKeyId", provider.AccessKeyID, ""},
-		{"provider.accessKeySecret", provider.AccessKeySecret, ""},
-		{"provider.securityToken", provider.SecurityToken, ""},
-		{"item.source.interface", cfg.Items[0].Source.Interface, "pppoe-out1"},
-		{"item.domain", cfg.Items[0].Domains[0].Domain, "example.com"},
 	} {
 		if field.got != field.want {
 			t.Errorf("%s = %q, want %q", field.name, field.got, field.want)
@@ -99,6 +85,9 @@ func TestDefaultConfigYAML(t *testing.T) {
 	}
 	if cfg.RouterOS.TLS.InsecureSkipVerify {
 		t.Error("default routeros TLS should verify certificates")
+	}
+	if got := cfg.RouterOS.Timeout.Duration; got != 10*time.Second {
+		t.Errorf("default routeros.timeout = %s, want 10s", got)
 	}
 	if cfg.Log.Level != "info" || cfg.Log.Format != "text" {
 		t.Errorf("default log = %q/%q, want info/text", cfg.Log.Level, cfg.Log.Format)
@@ -111,6 +100,9 @@ func TestDefaultConfigYAML(t *testing.T) {
 		cfg.Runtime.MaxBackoff.Duration != 5*time.Minute {
 		t.Errorf("default runtime = %+v", cfg.Runtime)
 	}
+	if summary := Summary(cfg); !strings.HasSuffix(summary, "providers:\n  (none)\nitems:\n") {
+		t.Errorf("default summary must show empty providers and items: %q", summary)
+	}
 }
 
 func TestDefaultConfigEnvOverrides(t *testing.T) {
@@ -121,11 +113,6 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 	t.Setenv("ROS_DDNS_ROUTEROS_USERNAME", "ddns")
 	t.Setenv("ROS_PASSWORD", "pw")
 	t.Setenv("ROS_DDNS_CA_FILE", "/data/ca.pem")
-	t.Setenv("ALI_ACCESS_KEY_ID", "id")
-	t.Setenv("ALI_ACCESS_KEY_SECRET", "secret")
-	t.Setenv("ALI_SECURITY_TOKEN", "sts")
-	t.Setenv("ROS_DDNS_INTERFACE", "wan")
-	t.Setenv("ROS_DDNS_DOMAIN", "host.example.com")
 	t.Setenv("ROS_DDNS_LOG_LEVEL", "debug")
 	t.Setenv("ROS_DDNS_LOG_FORMAT", "json")
 	t.Setenv("ROS_DDNS_POLL_INTERVAL", "2s")
@@ -140,15 +127,8 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse default configuration with environment overrides: %v", err)
 	}
-	if len(cfg.Items) != 1 || len(cfg.DNS.Providers) != 1 {
-		t.Fatalf("items=%d providers=%d, want 1 and 1", len(cfg.Items), len(cfg.DNS.Providers))
-	}
-	provider, ok := cfg.DNS.Providers["ali-main"]
-	if !ok {
-		t.Fatal("default provider ali-main is missing")
-	}
-	if len(cfg.Items[0].Domains) != 1 {
-		t.Fatalf("item domains=%d, want 1", len(cfg.Items[0].Domains))
+	if len(cfg.Items) != 0 || len(cfg.DNS.Providers) != 0 {
+		t.Fatalf("items=%d providers=%d, want 0 and 0", len(cfg.Items), len(cfg.DNS.Providers))
 	}
 	for _, field := range []struct{ name, got, want string }{
 		{"api.listen", cfg.API.Listen, "0.0.0.0:8080"},
@@ -157,11 +137,6 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 		{"routeros.username", cfg.RouterOS.Username, "ddns"},
 		{"routeros.password", cfg.RouterOS.Password, "pw"},
 		{"routeros.tls.caFile", cfg.RouterOS.TLS.CAFile, "/data/ca.pem"},
-		{"provider.accessKeyId", provider.AccessKeyID, "id"},
-		{"provider.accessKeySecret", provider.AccessKeySecret, "secret"},
-		{"provider.securityToken", provider.SecurityToken, "sts"},
-		{"item.source.interface", cfg.Items[0].Source.Interface, "wan"},
-		{"item.domain", cfg.Items[0].Domains[0].Domain, "host.example.com"},
 		{"log.level", cfg.Log.Level, "debug"},
 		{"log.format", cfg.Log.Format, "json"},
 		{"state.path", cfg.State.Path, "/tmp/custom-state.json"},
@@ -172,6 +147,9 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.RouterOS.TLS.InsecureSkipVerify {
 		t.Error("routeros TLS should still verify certificates with environment overrides")
+	}
+	if got := cfg.RouterOS.Timeout.Duration; got != 10*time.Second {
+		t.Errorf("routeros.timeout with environment overrides = %s, want 10s", got)
 	}
 	if cfg.Runtime.PollInterval.Duration != 2*time.Second ||
 		cfg.Runtime.StableFor.Duration != 5*time.Second ||

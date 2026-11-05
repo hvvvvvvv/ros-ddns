@@ -129,10 +129,6 @@ func (c *Config) Validate() error {
 		// in-app notifications, then retried with backoff.
 	}
 
-	if len(c.Items) == 0 {
-		add("items: at least one item is required")
-	}
-
 	enabledItems := 0
 	seenNames := map[string]bool{}
 

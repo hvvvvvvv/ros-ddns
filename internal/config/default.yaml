@@ -1,9 +1,11 @@
 # Default ros-ddns configuration, written on a daemon start when the configured
 # file does not exist (or when a service-managed start cannot load it).
+# Only basic runtime settings are included. After startup, add DNS providers
+# and synchronization items through the WebUI, or edit the configuration by hand.
 #
 # Every environment reference below has a default, so a service manager without
-# a shell environment still loads this file. Copy/edit it or use the WebUI;
-# Docker Compose can override the values through its env_file.
+# a shell environment still loads this file. Docker Compose can override the
+# values through its env_file.
 log:
   level: ${ROS_DDNS_LOG_LEVEL:-info}
   format: ${ROS_DDNS_LOG_FORMAT:-text}
@@ -37,32 +39,3 @@ routeros:
     # If referenced from the environment, the expanded value must be true/false.
     insecureSkipVerify: false
     caFile: ${ROS_DDNS_CA_FILE:-}
-
-dns:
-  providers:
-    ali-main:
-      type: aliyun
-      endpoint: alidns.aliyuncs.com
-      regionId: cn-hangzhou
-      accessKeyId: ${ALI_ACCESS_KEY_ID:-}
-      accessKeySecret: ${ALI_ACCESS_KEY_SECRET:-}
-      securityToken: ${ALI_SECURITY_TOKEN:-}
-      timeout: 10s
-      qps: 5
-
-items:
-  # Placeholder item: override the interface/domain from the environment or the
-  # WebUI. Failures are reported in the log and in-app notifications, and retried.
-  - name: home-ipv4
-    source:
-      interface: ${ROS_DDNS_INTERFACE:-pppoe-out1}
-      family: ipv4
-      select:
-        scope: public
-        index: 0
-    domains:
-      - provider: ali-main
-        domain: ${ROS_DDNS_DOMAIN:-example.com}
-        rr: home
-        ttl: 600
-        line: default

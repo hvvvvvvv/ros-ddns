@@ -196,7 +196,7 @@ func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
 	if recovery == nil || recovery.Quarantined != "" {
 		t.Fatalf("recovery = %+v", recovery)
 	}
-	if cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 1 {
+	if cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 0 {
 		t.Fatalf("loaded default = api %q items %d", cfg.API.Listen, len(cfg.Items))
 	}
 	wantState := filepath.ToSlash(filepath.Join(dir, "state.json"))
@@ -276,7 +276,7 @@ func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testin
 	if _, err := os.Stat(recovery.Quarantined); err != nil {
 		t.Fatalf("quarantined configuration missing: %v", err)
 	}
-	if cfg == nil || len(cfg.Items) != 1 {
+	if cfg == nil || len(cfg.Items) != 0 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

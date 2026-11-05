@@ -190,7 +190,6 @@ func TestValidateStructuredUsesAuthoritativeParser(t *testing.T) {
 			d["dns"].(map[string]any)["providers"].(map[string]any)["ali-main"].(map[string]any)["typo"] = 1
 		}},
 		{"invalid runtime", func(d map[string]any) { d["runtime"] = map[string]any{"pollInterval": "0s"} }},
-		{"no items", func(d map[string]any) { d["items"] = []any{} }},
 		{"expanded integer", func(d map[string]any) {
 			d["dns"].(map[string]any)["providers"].(map[string]any)["ali-main"].(map[string]any)["qps"] = "${EDIT_QPS:-5}"
 		}},
