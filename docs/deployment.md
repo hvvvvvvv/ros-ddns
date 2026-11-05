@@ -74,16 +74,15 @@ sudo mv -f "$tmp" /usr/local/bin/ros-ddns
 )
 ```
 
-配置文件是可选的：首次守护进程启动（手动或服务方式）会自动生成内嵌默认配置（`0600`，父目录 `0700`）。模板中所有字符串字段都带 `${VAR:-默认值}` 环境引用，可先导出变量再启动，也可以启动一次后编辑生成的文件或使用 WebUI：
+配置文件是可选的：首次守护进程启动（手动或服务方式）会自动生成内嵌默认配置（`0600`，父目录 `0700`）。模板保留 `log`、`runtime`、`state`、`api`、`routeros` 段及其中的 `${VAR:-默认值}` 环境引用，不含 `dns` 与 `items` 段。启动后在 WebUI 添加 DNS 服务商、凭据与同步项目，或手工补充配置。以下为手动运行前导出变量的示例：
 
 ```bash
 export ROS_PASSWORD='...'
-export ALI_ACCESS_KEY_ID='...'
-export ALI_ACCESS_KEY_SECRET='...'
-# 可选：ROS_DDNS_ROUTEROS_URL、ROS_DDNS_ROUTEROS_USERNAME、ROS_DDNS_INTERFACE、ROS_DDNS_DOMAIN
+export ROS_DDNS_API_TOKEN='一段随机长 token'
+# 可选：ROS_DDNS_ROUTEROS_URL、ROS_DDNS_ROUTEROS_USERNAME、ROS_DDNS_LISTEN、ROS_DDNS_CA_FILE
 ```
 
-服务方式运行**不继承 shell 环境**：没有显式提供环境时，生成配置中的引用会展开为模板默认值（空凭据、回环监听），之后可编辑生成文件或用 WebUI 配置。若配置里写了无默认值的 `${VAR}` 且变量未设置，服务方式启动会保留原文件为 `.invalid-<时间戳>` 并生成默认配置；手动运行则报错退出 `2`，不修改原文件。凭据可以留空或填写错误值：守护进程仍会启动，同步失败会记录日志与页内通知并退避重试。
+服务方式运行**不继承 shell 环境**：没有显式提供环境时，生成配置中的引用会展开为模板默认值（空 RouterOS 密码、回环监听），之后可编辑生成文件或用 WebUI 配置。若配置里写了无默认值的 `${VAR}` 且变量未设置，服务方式启动会保留原文件为 `.invalid-<时间戳>` 并生成默认配置；手动运行则报错退出 `2`，不修改原文件。没有同步项时可正常启动并开放 WebUI；添加同步项后，若所需凭据缺失或错误，守护进程仍会运行，同步失败会记录日志与页内通知并退避重试。
 
 服务模式下（Linux 与 Windows 相同）**相对路径以配置文件所在目录为基准**：进程启动时会切换到该目录，`state.path`、`tls.caFile`、`.bak` 都相对它解析。推荐直接使用绝对路径；默认配置生成的 `state.path` 是配置目录下的绝对路径。
 
@@ -105,8 +104,8 @@ sudo /usr/local/bin/ros-ddns -service start
 - 守护进程启动（含 `-service start` 与手动运行）的开箱即用行为：
   - 配置文件不存在 → 生成内嵌默认配置（`0600`，父目录缺失时以 `0700` 创建），写日志与页内通知。默认 `api.listen: 127.0.0.1:8080`、token 为空；模板字符串可被环境变量覆盖，服务方式无环境时使用默认值。打开 WebUI 即可继续配置。
   - 配置文件存在但无法加载（YAML / 结构错误、环境引用未展开等）→ 服务方式：原文件改名为 `config.yaml.invalid-<时间戳>` 保留，写入默认配置后继续启动，Error 日志与通知中心给出两个路径；手动运行：报错退出 `2`，原文件保持不变。
-  - 凭据缺失或错误、RouterOS / 阿里云不可达 → 服务照常运行；相关条目进入 degraded，日志与通知中心记录错误并退避重试，修复配置后自动恢复。
-  - 默认配置含一个占位条目（`pppoe-out1` / `example.com`），在完成配置前会周期性报错，这是预期行为；可在 WebUI 中替换或删除。
+  - 已添加同步项，但所需凭据缺失或错误、RouterOS / 阿里云不可达 → 服务照常运行；相关条目进入 degraded，日志与通知中心记录错误并退避重试，修复配置后自动恢复。
+  - 首次启动及服务模式恢复生成的默认配置都不含 DNS 服务商和同步项；`dns.providers` 与 `items` 为空是合法配置。启动后在 WebUI 添加服务商、凭据和同步项目，或手工编辑配置；不会产生占位条目的周期性报错。
   - 默认 `routeros.tls.insecureSkipVerify: false`；自签名路由器需改为 `true` 或提供 `caFile`。
 - 校验配置可交互执行（`-check` 不加载服务环境，含 `${VAR}` 的字段需自行导出）：
 
@@ -185,16 +184,18 @@ sudo /usr/local/bin/ros-ddns -service restart
 mkdir -p data
 cp .env.example .env
 chmod 600 .env
-# 编辑 .env：ROS_PASSWORD / ALI_* / ROS_DDNS_API_TOKEN，并设置
+# 编辑 .env：ROS_PASSWORD / ROS_DDNS_API_TOKEN，并设置
 # ROS_DDNS_LISTEN=0.0.0.0:8080；可按需覆盖 ROS_DDNS_ROUTEROS_URL、
-# ROS_DDNS_ROUTEROS_USERNAME、ROS_DDNS_INTERFACE、ROS_DDNS_DOMAIN
+# ROS_DDNS_ROUTEROS_USERNAME、ROS_DDNS_CA_FILE 及 log/runtime/state 参数
 sudo chown 10001:10001 data
 sudo chmod 700 data
 ```
 
 容器固定以 `10001:10001` 运行，绑定目录及现有状态 / `.bak` / CA 文件也必须允许该身份访问。宿主机普通用户可能需要 sudo 编辑 `0700` 目录。Docker Desktop 的 bind mount 权限行为取决于文件共享后端，应验证容器内可写并用宿主机 ACL 限制读取。SELinux 主机如遇挂载拒绝，需要管理员为该私有数据挂载配置适当标签。
 
-程序本身不读取 `.env`，Compose 的 `env_file` 将其注入进程。不要打印或分享展开后的 `docker compose config` 输出，它可能包含凭据；只校验语法可用 `docker compose config --quiet`。env 示例的单引号可防止 Compose 插值普通 `$` 等字符；含引号等特殊内容时按 Compose env 文件语法处理。更新凭据后需要重新创建容器，`docker compose restart` 不会重新注入 env。
+程序本身不读取 `.env`，Compose 的 `env_file` 将其注入进程。默认模板通过保留的环境引用读取 RouterOS 凭据、API token / listen 与 `log`、`runtime`、`state` 参数；首次启动后在 WebUI 中添加 Aliyun 服务商及其凭据、同步项目，或手工补充配置。
+
+不要打印或分享展开后的 `docker compose config` 输出，它可能包含凭据；只校验语法可用 `docker compose config --quiet`。env 示例的单引号可防止 Compose 插值普通 `$` 等字符；含引号等特殊内容时按 Compose env 文件语法处理。更新 `.env` 中的变量后需要重新创建容器，`docker compose restart` 不会重新注入 env。
 
 容器首次生成的配置使用 `.env` 的 `ROS_DDNS_LISTEN=0.0.0.0:8080` 才能让发布端口可达；由于这不是回环监听，**必须设置非空 API token**（`.env` 的 `ROS_DDNS_API_TOKEN`），即使宿主机仅发布到 `127.0.0.1` 也一样。未设置 `ROS_DDNS_LISTEN` 时生成默认回环监听，宿主机发布端口将无法访问 WebUI。默认宿主机绑定 `127.0.0.1:8080:8080`；端口被占用时在 `.env` 中设置 `ROS_DDNS_HTTP_BIND=127.0.0.1:18082` 等值，容器内仍监听 8080。远程访问通过受控 TLS 反向代理；代理须保留正确 Host / 转发协议语义。不要直接把无 TLS 的管理接口公开到互联网。健康探针公开，不需要 token。自签名 RouterOS 默认校验证书：可把 CA 挂载到 `/data/router-ca.pem` 并用 `ROS_DDNS_CA_FILE` 指定，或在 WebUI / 生成配置中把 `insecureSkipVerify` 改为 `true`；若在配置中写环境引用，展开值必须是 `true` / `false`。
 
@@ -223,7 +224,7 @@ curl -sS -i http://${ROS_DDNS_HTTP_BIND:-127.0.0.1:8080}/readyz
 
 `docker compose up -d --build` 会以 Compose 文件中的默认值（`dev` / `unknown` / `unknown`）重建并覆盖现有镜像，不会自动读取 git tag；只有显式导出上面三个变量（或作为一次性环境变量传给命令）时镜像才带标准版本。Windows PowerShell 可用 `$env:VERSION = "$(git describe --tags --always --dirty)"`、`$env:COMMIT = "$(git rev-parse --short HEAD)"`、`$env:BUILD_DATE = "$(git log -1 --format=%cI)"` 设置后再执行 compose 命令。
 
-Compose 每 30 秒通过容器内 `wget` 请求 `healthz`，超时 5 秒，启动宽限 15 秒，连续 3 次失败标记 unhealthy。Docker 的 `unless-stopped` 处理进程退出，**不会仅因 unhealthy 自动重启**；需由运维监控处理。healthcheck 只证明 HTTP 存活，不证明实际 DNS 写入。容器内程序按前台模式运行：首次启动会在 `/data/config.yaml` 生成配置，`.env` 中带默认值的环境引用提供凭据、监听地址和 token；若 `.env` 未设置 `ROS_DDNS_LISTEN`，生成的默认监听为 `127.0.0.1:8080`，宿主机发布端口无法访问 WebUI。
+Compose 每 30 秒通过容器内 `wget` 请求 `healthz`，超时 5 秒，启动宽限 15 秒，连续 3 次失败标记 unhealthy。Docker 的 `unless-stopped` 处理进程退出，**不会仅因 unhealthy 自动重启**；需由运维监控处理。healthcheck 只证明 HTTP 存活，不证明实际 DNS 写入。容器内程序按前台模式运行：首次启动会在 `/data/config.yaml` 生成配置，生成文件保留带默认值的环境引用，从 `.env` 获取 RouterOS 凭据、API 监听地址与 token，以及 `log`、`runtime`、`state` 参数。DNS 服务商与同步项目需启动后添加；若 `.env` 未设置 `ROS_DDNS_LISTEN`，生成的默认监听为 `127.0.0.1:8080`，宿主机发布端口无法访问 WebUI。
 
 运行时根文件系统只读，去除所有 capabilities，并启用 no-new-privileges；`/tmp` 使用 tmpfs，`/data` 是可写持久挂载。状态固定为 `/data/state.json`，锁由 Dockerfile 的 `CMD` 固定为 `/data/state.json.lock`（不随 state.path 热重载移动）。不要只绑定单个 `config.yaml` 文件或把 `/data` 挂成只读，否则 WebUI 的临时文件、rename 和 `.bak` 保存无法正常工作。热重载状态路径也应留在可写目录内。
 
@@ -231,7 +232,7 @@ Compose 每 30 秒通过容器内 `wget` 请求 `healthz`，超时 5 秒，启�
 
 ### 3.3 WebUI、更新与清理
 
-WebUI 地址是 `http://127.0.0.1:8080/`。配置保存更新宿主机 `data/config.yaml`，备份为 `data/config.yaml.bak`；环境引用仍保留，但注释和排版可能被规范化。环境变化、API 地址 / token、日志格式修改需重新创建容器；其他支持字段可由 WebUI 热重载。手动编辑磁盘配置后也需重启 / 重建才能加载。
+WebUI 地址是 `http://127.0.0.1:8080/`。首次打开后，在 Config 页添加 DNS 服务商及 Aliyun 凭据，再到「同步项目」页添加接口与域名等信息，并保存应用。配置保存更新宿主机 `data/config.yaml`，备份为 `data/config.yaml.bak`；环境引用仍保留，但注释和排版可能被规范化。环境变化、API 地址 / token、日志格式修改需重新创建容器；其他支持字段可由 WebUI 热重载。手动编辑磁盘配置后也需重启 / 重建才能加载。
 
 升级前备份 data 和 `.env` 到权限受限的位置，并保留旧镜像：
 
@@ -254,7 +255,8 @@ docker compose logs --tail=100 ros-ddns
 配置、`.bak`、状态和锁即使没有明文凭据，也可能暴露域名、IP、接口、RecordId 和路径。配置中的凭据使用文件权限保护（服务方式 `0600`、目录 `0700`），WebUI 与 API 只对已认证客户端可见；服务模式下不再有独立的 root-only env 文件，凭据直接位于配置文件中，因此配置文件的权限即凭据权限。环境变量（交互模式或容器注入）仍可被宿主机管理员读取，不是抵抗管理员的秘密存储。不要公开日志、配置 API 响应或未经检查的诊断包。
 
 - 静态配置校验通过；域名、接口、CA、token 和目录权限均已核对。
-- 守护进程启动（手动或服务方式）在配置缺失时生成默认配置；服务方式下无法加载的配置会保留为 `.invalid-<时间戳>` 后生成默认配置。WebUI 可打开；凭据缺失或错误时进程保持运行、日志与通知持续报错并重试；修复后热重载恢复。
+- 守护进程启动（手动或服务方式）在配置缺失时生成默认配置；服务方式下无法加载的配置会保留为 `.invalid-<时间戳>` 后生成默认配置。生成配置不含 DNS 服务商或同步项，WebUI 可打开并添加配置，不产生占位条目的周期性报错。
+- 添加同步项后，验证所需凭据缺失或错误时进程保持运行、日志与通知报错并重试；修复后热重载恢复。
 - 启动日志显示取得预期锁；第二个使用同一锁的实例立即失败且不发起同步；持锁时 `-check` 仍成功。
 - `healthz` 为 200，`readyz` 最终为 200；同时确认项目 phase / lastError，不能把探针当作 DNS 写入验收。
 - WebUI 能读取、保存允许热重载的配置，磁盘配置及 `.bak` 所有者 / 权限正确；env 引用保留。

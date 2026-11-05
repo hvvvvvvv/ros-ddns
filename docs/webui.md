@@ -4,7 +4,9 @@ WebUI 随 Go 二进制通过 `go:embed` 内嵌，与 HTTP API 共用 `api.listen
 
 ## 1. 启动与连接
 
-先按 [README](../README.md#快速开始) 准备 RouterOS、凭据和配置。下面是配置示例；URL、接口、域名和 MAC 应按实际环境调整，`${ENV}` 由启动进程的环境变量提供，程序不自动读取 `.env`。RouterOS HTTPS 需使用可信证书，私有 CA 的设置见 [RouterOS 指南](routeros-setup.md)。
+先按 [README](../README.md#快速开始) 准备 RouterOS 并启动守护进程。首次启动生成的默认配置不含 DNS 服务商或同步项目；`dns.providers` 与 `items` 为空时仍可正常打开 WebUI。在 Config 页添加 DNS 服务商及其凭据，再到「同步项目」页添加接口与域名等信息，并保存应用。
+
+也可以手工编写配置。下面是完整配置示例，其中的 `ali-main` 和同步项目需自行添加；URL、接口、域名和 MAC 应按实际环境调整。手写配置支持 `${VAR}` / `${VAR:-默认值}`，示例中的 `${ENV}` 由启动进程的环境变量提供，程序不自动读取 `.env`。RouterOS HTTPS 需使用可信证书，私有 CA 的设置见 [RouterOS 指南](routeros-setup.md)。
 
 ```yaml
 log:
@@ -46,7 +48,7 @@ items:
       list: ddns-home-ipv6
 ```
 
-保存为自己的配置文件后，在仓库根目录构建并启动：
+可在仓库根目录直接构建并启动，让程序生成默认配置；或先将上述示例按实际环境修改，保存到 `build/configs/config.local.yaml` 并提供所引用的环境变量，再启动：
 
 ```powershell
 # Windows PowerShell

@@ -1,6 +1,6 @@
 # 配置参考
 
-本页对应最终配置加载器与校验代码。默认配置由守护进程首次启动时生成（内嵌模板为 `internal/config/default.yaml`，字符串字段都带默认值的环境引用）；字段说明如下，CLI 用法见 [README](../README.md#命令行)。
+本页对应最终配置加载器与校验代码。默认配置由守护进程首次启动或服务模式恢复配置时生成（内嵌模板为 `internal/config/default.yaml`，环境引用均带默认值）；字段说明如下，CLI 用法见 [README](../README.md#命令行)。
 
 ## 1. 解析与默认值
 
@@ -42,7 +42,11 @@ api:
 
 展开、解码和语义校验错误会清洗已展开值及相关诊断表示，尽量保留字段位置和错误原因。程序不自动读取 `.env`；环境变量由 shell、服务管理器或部署系统传入。以 OS 服务方式运行时进程不继承 shell 环境：含无默认值 `${VAR}` 的配置在服务启动时会加载失败（原文件会被保留为 `.invalid-<时间戳>`），应使用字面值或在 WebUI 中配置；开启 `-service` 前也建议先用 `-check` 配合相同环境验证。
 
-默认配置模板（首次启动生成）使用下列可选变量，都带默认值，未设置时不会阻止启动：`log` 段 `ROS_DDNS_LOG_LEVEL`、`ROS_DDNS_LOG_FORMAT`；`runtime` 段 `ROS_DDNS_POLL_INTERVAL`、`ROS_DDNS_STABLE_FOR`、`ROS_DDNS_RECONCILE_TIMEOUT`、`ROS_DDNS_VERIFY_INTERVAL`、`ROS_DDNS_SYNC_ON_START`、`ROS_DDNS_MAX_BACKOFF`；`state` 段 `ROS_DDNS_STATE_PATH`；`api` 段 `ROS_DDNS_LISTEN`、`ROS_DDNS_API_TOKEN`；以及 `ROS_DDNS_ROUTEROS_URL`、`ROS_DDNS_ROUTEROS_USERNAME`、`ROS_PASSWORD`、`ROS_DDNS_CA_FILE`、`ALI_ACCESS_KEY_ID`、`ALI_ACCESS_KEY_SECRET`、`ALI_SECURITY_TOKEN`、`ROS_DDNS_INTERFACE`、`ROS_DDNS_DOMAIN`。生成文件会把 `state.path` 写成 `${ROS_DDNS_STATE_PATH:-<配置目录下的绝对路径>}`；TLS `insecureSkipVerify` 默认是 YAML 字面量 `false`，自签名路由器需在 YAML / WebUI 中改为 `true` 或提供 `caFile`（如改成环境引用，展开值必须是 `true` / `false`）。
+默认配置模板（首次启动或服务模式恢复配置时生成）保留以下可选变量，引用都带默认值，未设置时不会阻止启动：`log` 段 `ROS_DDNS_LOG_LEVEL`、`ROS_DDNS_LOG_FORMAT`；`runtime` 段 `ROS_DDNS_POLL_INTERVAL`、`ROS_DDNS_STABLE_FOR`、`ROS_DDNS_RECONCILE_TIMEOUT`、`ROS_DDNS_VERIFY_INTERVAL`、`ROS_DDNS_SYNC_ON_START`、`ROS_DDNS_MAX_BACKOFF`；`state` 段 `ROS_DDNS_STATE_PATH`；`api` 段 `ROS_DDNS_LISTEN`、`ROS_DDNS_API_TOKEN`；`routeros` 段 `ROS_DDNS_ROUTEROS_URL`、`ROS_DDNS_ROUTEROS_USERNAME`、`ROS_PASSWORD`、`ROS_DDNS_CA_FILE`。
+
+默认模板不含 `dns` 段（包括 `dns.providers`）与 `items` 段；`dns.providers` 与 `items` 为空是合法配置，守护进程可正常启动并开放 WebUI。首次启动后需在 WebUI 中添加 DNS 服务商、凭据和同步项目，或手工补充配置；手写配置仍支持上述 `${VAR}` / `${VAR:-默认值}` 展开。
+
+生成文件会把 `state.path` 写成 `${ROS_DDNS_STATE_PATH:-<配置目录下的绝对路径>}`；TLS `insecureSkipVerify` 默认是 YAML 字面量 `false`，自签名路由器需在 YAML / WebUI 中改为 `true` 或提供 `caFile`（如改成环境引用，展开值必须是 `true` / `false`）。
 
 ## 3. 完整字段参考
 
@@ -55,9 +59,9 @@ api:
 | `state` | object | 否；使用子字段默认值 | 状态缓存路径 |
 | `api` | object | 否；使用子字段默认值 | 守护进程 HTTP API |
 | `routeros` | object | 是 | 单个连接，至少提供 URL 和用户名 |
-| `dns` | object | 否；providers 为空 | 仅维护列表时可省略 |
+| `dns` | object | 否；providers 为空 | 无 DNS 绑定时可省略，包括尚未添加同步项或仅维护列表 |
 | `dns.providers` | `map<string, object>` | 否；空 map | 自定义名字供域名绑定引用；每个已定义实例都校验 |
-| `items` | `array<object>` | 是；无默认项 | 至少一项，且至少一项启用 |
+| `items` | `array<object>` | 否；空数组 | 可省略或为空；非空时至少一项启用 |
 
 ### 3.2 `log`、`runtime`、`state`
 
@@ -194,7 +198,7 @@ MAC 支持冒号、连字符、点分或连续 12 位十六进制，统一为小
 
 ## 4. 跨字段校验与规范化
 
-禁用项仍需合法 name、source、目标和 provider 引用，但不会因为它引用 provider 而要求 AK。所有 name 必须唯一，至少保留一个启用项。
+禁用项仍需合法 name、source、目标和 provider 引用，但不会因为它引用 provider 而要求 AK。所有 name 必须唯一；`items` 可为空，非空时至少保留一个启用项。
 
 启用目标不能重复，包括同一条目内重复 DNS 绑定：
 
@@ -208,6 +212,8 @@ TTL 不属于 DNS 身份；改 TTL 会保留 RecordId 提示并使该绑定重�
 枚举字段转小写；domain / rr 转小写；name、interface、provider 引用、list、comment、prefix、API token、状态路径、CA 路径等去首尾空白。line、接口和名称不会统一转小写。密码和 AK / STS 保留原值。routeros URL 去末尾斜杠，domain 去一个末尾点，MAC 统一格式。
 
 ## 5. 配置示例
+
+以下是手工配置 DNS 同步或地址列表的示例；请按实际环境替换接口、域名和凭据，并为环境变量引用提供相应的进程环境。示例中的 provider 和同步项需自行添加。
 
 ### 5.1 最小 IPv4 DNS 配置
 
