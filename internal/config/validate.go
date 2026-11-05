@@ -129,7 +129,6 @@ func (c *Config) Validate() error {
 		// in-app notifications, then retried with backoff.
 	}
 
-	enabledItems := 0
 	seenNames := map[string]bool{}
 
 	for i := range c.Items {
@@ -137,9 +136,6 @@ func (c *Config) Validate() error {
 		label := fmt.Sprintf("items[%d]", i)
 		if it.Name != "" {
 			label = fmt.Sprintf("items[%d] (%s)", i, it.Name)
-		}
-		if !it.Disabled {
-			enabledItems++
 		}
 
 		// name
@@ -254,10 +250,6 @@ func (c *Config) Validate() error {
 				}
 			}
 		}
-	}
-
-	if len(c.Items) > 0 && enabledItems == 0 {
-		add("items: at least one item must be enabled")
 	}
 
 	// Duplicate targets are only a problem for enabled items.

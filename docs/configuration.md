@@ -61,7 +61,7 @@ api:
 | `routeros` | object | 是 | 单个连接，至少提供 URL 和用户名 |
 | `dns` | object | 否；providers 为空 | 无 DNS 绑定时可省略，包括尚未添加同步项或仅维护列表 |
 | `dns.providers` | `map<string, object>` | 否；空 map | 自定义名字供域名绑定引用；每个已定义实例都校验 |
-| `items` | `array<object>` | 否；空数组 | 可省略或为空；非空时至少一项启用 |
+| `items` | `array<object>` | 否；空数组 | 可省略、为空或全部禁用；启用项才参与同步 |
 
 ### 3.2 `log`、`runtime`、`state`
 
@@ -198,7 +198,7 @@ MAC 支持冒号、连字符、点分或连续 12 位十六进制，统一为小
 
 ## 4. 跨字段校验与规范化
 
-禁用项仍需合法 name、source、目标和 provider 引用，但不会因为它引用 provider 而要求 AK。所有 name 必须唯一；`items` 可为空，非空时至少保留一个启用项。
+禁用项仍需合法 name、source、目标和 provider 引用，但不会因为它引用 provider 而要求 AK。所有 name 必须唯一；`items` 可为空或全部禁用，此时守护进程照常启动并提供 WebUI，只是没有同步任务。
 
 启用目标不能重复，包括同一条目内重复 DNS 绑定：
 

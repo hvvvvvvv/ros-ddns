@@ -357,10 +357,14 @@ items:
 	}
 }
 
-func TestAllItemsDisabledRejected(t *testing.T) {
+func TestAllItemsDisabledAccepted(t *testing.T) {
 	yaml := strings.Replace(minimalConfig, "name: wan-v6", "name: wan-v6\n    disabled: true", 1)
-	if _, err := loadString(t, yaml); err == nil || !strings.Contains(err.Error(), "at least one item must be enabled") {
-		t.Fatalf("error = %v, want all-disabled rejection", err)
+	cfg, err := loadString(t, yaml)
+	if err != nil {
+		t.Fatalf("Load rejected an all-disabled configuration: %v", err)
+	}
+	if len(cfg.Items) != 1 || !cfg.Items[0].Disabled {
+		t.Fatalf("items = %+v, want the only item disabled", cfg.Items)
 	}
 }
 
