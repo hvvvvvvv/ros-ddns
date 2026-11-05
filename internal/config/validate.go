@@ -75,9 +75,58 @@ func (c *Config) Validate() error {
 		add("api.token: a token is required when api.listen binds a non-loopback address (%q); bind to 127.0.0.1/::1 or set a token", c.API.Listen)
 	}
 
+	if !validAPIToken(c.API.Token) {
+		add("api.token: must be at most 256 bytes of printable ASCII without spaces or control characters")
+	}
+
+	hasEnabledItems := false
+	for _, it := range c.Items {
+		if !it.Disabled {
+			hasEnabledItems = true
+			break
+		}
+	}
+	if hasEnabledItems {
+		problems = append(problems, c.CheckRouterOS()...)
+	} else {
+		problems = append(problems, c.checkRouterOS(false)...)
+	}
+	for name := range c.DNS.Providers {
+		problems = append(problems, c.CheckProvider(name)...)
+	}
+	for i := range c.Items {
+		if c.Items[i].Disabled {
+			problems = append(problems, c.checkItemName(i)...)
+		} else {
+			problems = append(problems, c.CheckItem(i)...)
+		}
+	}
+	for _, conflict := range c.TargetConflicts() {
+		problems = append(problems, conflict.Message)
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid config:\n - %s", strings.Join(problems, "\n - "))
+	}
+	return nil
+}
+
+// CheckRouterOS fully validates normalized RouterOS settings for enabled items.
+// URL and username are always required, regardless of the current items.
+func (c *Config) CheckRouterOS() []string {
+	return c.checkRouterOS(true)
+}
+
+func (c *Config) checkRouterOS(required bool) []string {
+	var problems []string
+	add := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
 	// routeros
 	if c.RouterOS.URL == "" {
-		add("routeros.url: must not be empty")
+		if required {
+			add("routeros.url: must not be empty")
+		}
 	} else if u, err := url.Parse(c.RouterOS.URL); err != nil {
 		// Parser errors can echo the raw URL, including userinfo passwords.
 		add("routeros.url: invalid URL")
@@ -99,7 +148,7 @@ func (c *Config) Validate() error {
 			add("routeros.url: do not include /rest; the client appends it automatically")
 		}
 	}
-	if c.RouterOS.Username == "" {
+	if required && c.RouterOS.Username == "" {
 		add("routeros.username: must not be empty")
 	}
 	if c.RouterOS.Timeout.Duration <= 0 {
@@ -108,150 +157,199 @@ func (c *Config) Validate() error {
 	if c.RouterOS.TLS.InsecureSkipVerify && c.RouterOS.TLS.CAFile != "" {
 		add("routeros.tls: insecureSkipVerify and caFile are mutually exclusive")
 	}
+	return problems
+}
 
-	for name, p := range c.DNS.Providers {
-		label := "dns.providers." + name
-		if p.Type != "aliyun" {
-			add("%s.type: unsupported provider type %q (supported: aliyun)", label, p.Type)
-		}
-		if p.Endpoint == "" {
-			add("%s.endpoint: must not be empty", label)
-		}
-		if p.Timeout.Duration <= 0 {
-			add("%s.timeout: must be greater than 0", label)
-		}
-		if p.QPS < 1 {
-			add("%s.qps: must be at least 1", label)
-		}
-		// Provider credentials are intentionally not required here: a missing or
-		// invalid AccessKey must not prevent the daemon from starting. Provider
-		// requests fail at synchronization time and are reported in the log and
-		// in-app notifications, then retried with backoff.
+// CheckProvider checks one normalized provider. An unknown name has no problems.
+func (c *Config) CheckProvider(name string) []string {
+	p, ok := c.DNS.Providers[name]
+	if !ok {
+		return nil
+	}
+	var problems []string
+	add := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	label := "dns.providers." + name
+	if p.Type != "aliyun" {
+		add("%s.type: unsupported provider type %q (supported: aliyun)", label, p.Type)
+	}
+	if p.Endpoint == "" {
+		add("%s.endpoint: must not be empty", label)
+	}
+	if p.Timeout.Duration <= 0 {
+		add("%s.timeout: must be greater than 0", label)
+	}
+	if p.QPS < 1 {
+		add("%s.qps: must be at least 1", label)
+	}
+	// Provider credentials are intentionally not required here: a missing or
+	// invalid AccessKey must not prevent the daemon from starting. Provider
+	// requests fail at synchronization time and are reported in the log and
+	// in-app notifications, then retried with backoff.
+	return problems
+}
+
+// CheckItem fully validates one normalized item for use as an enabled item,
+// regardless of its Disabled flag. It checks names duplicated by earlier items
+// and refreshes derived prefix and MAC fields on every call. Out-of-range indexes
+// have no problems. Validate only calls this full check for enabled items.
+func (c *Config) CheckItem(i int) []string {
+	if i < 0 || i >= len(c.Items) {
+		return nil
+	}
+	problems := c.checkItemName(i)
+	add := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	it := &c.Items[i]
+	label := fmt.Sprintf("items[%d]", i)
+	if it.Name != "" {
+		label = fmt.Sprintf("items[%d] (%s)", i, it.Name)
 	}
 
-	seenNames := map[string]bool{}
+	// source
+	if it.Source.Interface == "" {
+		add("%s.source.interface: must not be empty", label)
+	}
+	switch it.Source.Family {
+	case FamilyIPv4, FamilyIPv6:
+	default:
+		add("%s.source.family: unsupported value %q (ipv4|ipv6)", label, it.Source.Family)
+	}
+	switch it.Source.Select.Scope {
+	case ScopePublic, ScopeAny:
+	default:
+		add("%s.source.select.scope: unsupported value %q (public|any)", label, it.Source.Select.Scope)
+	}
+	if it.Source.Select.Index < 0 {
+		add("%s.source.select.index: must not be negative", label)
+	}
 
-	for i := range c.Items {
-		it := &c.Items[i]
-		label := fmt.Sprintf("items[%d]", i)
-		if it.Name != "" {
-			label = fmt.Sprintf("items[%d] (%s)", i, it.Name)
-		}
-
-		// name
-		switch {
-		case it.Name == "":
-			add("%s.name: must not be empty", label)
-		case !itemNameRE.MatchString(it.Name):
-			add("%s.name: %q must match ^[a-z0-9][a-z0-9_-]{0,63}$", label, it.Name)
-		case seenNames[it.Name]:
-			add("%s.name: duplicate item name %q", label, it.Name)
-		default:
-			seenNames[it.Name] = true
-		}
-
-		// source
-		if it.Source.Interface == "" {
-			add("%s.source.interface: must not be empty", label)
-		}
-		switch it.Source.Family {
-		case FamilyIPv4, FamilyIPv6:
-		default:
-			add("%s.source.family: unsupported value %q (ipv4|ipv6)", label, it.Source.Family)
-		}
-		switch it.Source.Select.Scope {
-		case ScopePublic, ScopeAny:
-		default:
-			add("%s.source.select.scope: unsupported value %q (public|any)", label, it.Source.Select.Scope)
-		}
-		if it.Source.Select.Index < 0 {
-			add("%s.source.select.index: must not be negative", label)
-		}
-
-		it.Source.Select.PrefixNet = nil
-		if it.Source.Select.Prefix != "" {
-			p, err := netip.ParsePrefix(it.Source.Select.Prefix)
-			if err != nil {
-				add("%s.source.select.prefix: invalid CIDR %q: %v", label, it.Source.Select.Prefix, err)
-			} else {
-				masked := p.Masked()
-				it.Source.Select.PrefixNet = &masked
-				switch it.Source.Family {
-				case FamilyIPv4:
-					if !p.Addr().Is4() {
-						add("%s.source.select.prefix: %s is not an IPv4 prefix", label, p)
-					}
-				case FamilyIPv6:
-					if !p.Addr().Is6() || p.Addr().Is4In6() {
-						add("%s.source.select.prefix: %s is not an IPv6 prefix", label, p)
-					}
+	it.Source.Select.PrefixNet = nil
+	if it.Source.Select.Prefix != "" {
+		p, err := netip.ParsePrefix(it.Source.Select.Prefix)
+		if err != nil {
+			add("%s.source.select.prefix: invalid CIDR %q: %v", label, it.Source.Select.Prefix, err)
+		} else {
+			masked := p.Masked()
+			it.Source.Select.PrefixNet = &masked
+			switch it.Source.Family {
+			case FamilyIPv4:
+				if !p.Addr().Is4() {
+					add("%s.source.select.prefix: %s is not an IPv4 prefix", label, p)
 				}
-			}
-		}
-
-		it.Source.EUI64MACAddr = nil
-		if it.Source.EUI64MAC != "" {
-			if it.Source.Family != FamilyIPv6 {
-				add("%s.source.eui64-mac: only valid for family %s", label, FamilyIPv6)
-			}
-			hw, err := eui64.ParseMAC(it.Source.EUI64MAC)
-			if err != nil {
-				add("%s.source.eui64-mac: %v", label, err)
-			} else {
-				it.Source.EUI64MAC = hw.String()
-				it.Source.EUI64MACAddr = hw
-			}
-		}
-
-		if len(it.Domains) == 0 && it.AddressList == nil {
-			add("%s: at least one of domains or addressList is required", label)
-		}
-
-		for j := range it.Domains {
-			d := &it.Domains[j]
-			dlabel := fmt.Sprintf("%s.domains[%d]", label, j)
-			if d.Provider == "" {
-				add("%s.provider: must not be empty", dlabel)
-			} else if _, ok := c.DNS.Providers[d.Provider]; !ok {
-				add("%s.provider: unknown provider %q", dlabel, d.Provider)
-			}
-			if d.Domain == "" {
-				add("%s.domain: must not be empty", dlabel)
-			} else if !validDomain(d.Domain) {
-				add("%s.domain: invalid domain %q", dlabel, d.Domain)
-			}
-			if d.RR == "" {
-				add("%s.rr: must not be empty", dlabel)
-			} else if !validRR(d.RR) {
-				add("%s.rr: invalid record name %q", dlabel, d.RR)
-			}
-			if d.TTL < 1 || d.TTL > 86400 {
-				add("%s.ttl: must be between 1 and 86400", dlabel)
-			}
-			if d.Line == "" {
-				add("%s.line: must not be empty", dlabel)
-			}
-			if d.Domain != "" && d.RR != "" && len(d.FQDN()) > 253 {
-				add("%s: fully qualified name exceeds 253 characters", dlabel)
-			}
-		}
-
-		if it.AddressList != nil {
-			al := it.AddressList
-			if al.List == "" {
-				add("%s.addressList.list: must not be empty", label)
-			}
-			if al.Comment == "" {
-				add("%s.addressList.comment: must not be empty", label)
-			}
-			if al.Timeout != "" {
-				if _, err := parseROSDuration(al.Timeout); err != nil {
-					add("%s.addressList.timeout: %v", label, err)
+			case FamilyIPv6:
+				if !p.Addr().Is6() || p.Addr().Is4In6() {
+					add("%s.source.select.prefix: %s is not an IPv6 prefix", label, p)
 				}
 			}
 		}
 	}
 
+	it.Source.EUI64MACAddr = nil
+	if it.Source.EUI64MAC != "" {
+		if it.Source.Family != FamilyIPv6 {
+			add("%s.source.eui64-mac: only valid for family %s", label, FamilyIPv6)
+		}
+		hw, err := eui64.ParseMAC(it.Source.EUI64MAC)
+		if err != nil {
+			add("%s.source.eui64-mac: %v", label, err)
+		} else {
+			it.Source.EUI64MAC = hw.String()
+			it.Source.EUI64MACAddr = hw
+		}
+	}
+
+	if len(it.Domains) == 0 && it.AddressList == nil {
+		add("%s: at least one of domains or addressList is required", label)
+	}
+
+	for j := range it.Domains {
+		d := &it.Domains[j]
+		dlabel := fmt.Sprintf("%s.domains[%d]", label, j)
+		if d.Provider == "" {
+			add("%s.provider: must not be empty", dlabel)
+		} else if _, ok := c.DNS.Providers[d.Provider]; !ok {
+			add("%s.provider: unknown provider %q", dlabel, d.Provider)
+		}
+		if d.Domain == "" {
+			add("%s.domain: must not be empty", dlabel)
+		} else if !validDomain(d.Domain) {
+			add("%s.domain: invalid domain %q", dlabel, d.Domain)
+		}
+		if d.RR == "" {
+			add("%s.rr: must not be empty", dlabel)
+		} else if !validRR(d.RR) {
+			add("%s.rr: invalid record name %q", dlabel, d.RR)
+		}
+		if d.TTL < 1 || d.TTL > 86400 {
+			add("%s.ttl: must be between 1 and 86400", dlabel)
+		}
+		if d.Line == "" {
+			add("%s.line: must not be empty", dlabel)
+		}
+		if d.Domain != "" && d.RR != "" && len(d.FQDN()) > 253 {
+			add("%s: fully qualified name exceeds 253 characters", dlabel)
+		}
+	}
+
+	if it.AddressList != nil {
+		al := it.AddressList
+		if al.List == "" {
+			add("%s.addressList.list: must not be empty", label)
+		}
+		if al.Comment == "" {
+			add("%s.addressList.comment: must not be empty", label)
+		}
+		if al.Timeout != "" {
+			if _, err := parseROSDuration(al.Timeout); err != nil {
+				add("%s.addressList.timeout: %v", label, err)
+			}
+		}
+	}
+	return problems
+}
+
+func (c *Config) checkItemName(i int) []string {
+	it := &c.Items[i]
+	label := fmt.Sprintf("items[%d]", i)
+	if it.Name != "" {
+		label = fmt.Sprintf("items[%d] (%s)", i, it.Name)
+	}
+	switch {
+	case it.Name == "":
+		return []string{fmt.Sprintf("%s.name: must not be empty", label)}
+	case !itemNameRE.MatchString(it.Name):
+		return []string{fmt.Sprintf("%s.name: %q must match ^[a-z0-9][a-z0-9_-]{0,63}$", label, it.Name)}
+	case c.itemNameSeen(i, it.Name):
+		return []string{fmt.Sprintf("%s.name: duplicate item name %q", label, it.Name)}
+	}
+	return nil
+}
+
+func (c *Config) itemNameSeen(i int, name string) bool {
+	for j := 0; j < i; j++ {
+		if c.Items[j].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TargetConflict identifies a later occurrence of a target among enabled items.
+type TargetConflict struct {
+	ItemIndex int
+	Message   string
+}
+
+// TargetConflicts checks enabled targets in item and domain order, including
+// repeated records within a single item, just like strict validation.
+func (c *Config) TargetConflicts() []TargetConflict {
+	var conflicts []TargetConflict
+	add := func(i int, format string, args ...any) {
+		conflicts = append(conflicts, TargetConflict{ItemIndex: i, Message: fmt.Sprintf(format, args...)})
+	}
 	// Duplicate targets are only a problem for enabled items.
 	recordKeys := map[string]string{}
 	listKeys := map[string]string{}
@@ -264,7 +362,7 @@ func (c *Config) Validate() error {
 		for _, d := range it.Domains {
 			key := strings.Join([]string{d.Provider, d.Domain, d.RR, typ, d.Line}, "\x00")
 			if prev, ok := recordKeys[key]; ok {
-				add("items[%d] (%s): duplicate record target %s %s (already configured by item %s)", i, it.Name, d.FQDN(), typ, prev)
+				add(i, "items[%d] (%s): duplicate record target %s %s (already configured by item %s)", i, it.Name, d.FQDN(), typ, prev)
 			} else {
 				recordKeys[key] = it.Name
 			}
@@ -272,7 +370,7 @@ func (c *Config) Validate() error {
 		if it.AddressList != nil {
 			key := strings.Join([]string{it.Source.Family, it.AddressList.List, it.AddressList.Comment}, "\x00")
 			if prev, ok := listKeys[key]; ok {
-				add("items[%d] (%s): duplicate address-list target list=%q comment=%q (already configured by item %s)",
+				add(i, "items[%d] (%s): duplicate address-list target list=%q comment=%q (already configured by item %s)",
 					i, it.Name, it.AddressList.List, it.AddressList.Comment, prev)
 			} else {
 				listKeys[key] = it.Name
@@ -280,10 +378,20 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if len(problems) > 0 {
-		return fmt.Errorf("invalid config:\n - %s", strings.Join(problems, "\n - "))
+	return conflicts
+}
+
+// validAPIToken accepts an unset token or at most 256 visible ASCII bytes.
+func validAPIToken(token string) bool {
+	if len(token) > 256 {
+		return false
 	}
-	return nil
+	for i := 0; i < len(token); i++ {
+		if token[i] < 0x21 || token[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validListenPort(port string) bool {

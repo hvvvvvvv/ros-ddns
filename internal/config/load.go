@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,30 @@ func Load(path string) (*Config, error) {
 // boolean fields accept environment-expanded true/false values.
 // It then applies defaults and validation. The path is used for Config.Path.
 func Parse(data []byte, path string) (*Config, error) {
+	document, err := parseYAMLDocument(data)
+	if err != nil {
+		return nil, err
+	}
+	cfg, values, err := decodeConfig(document, path)
+	if err != nil {
+		return nil, err
+	}
+	listen := cfg.API.Listen
+	cfg.Normalize()
+	// Strict loading has always rejected whitespace in the port. Preserve
+	// that diagnostic even though Normalize now trims the whole address.
+	// No successful Parse result retains an unnormalized listener.
+	if _, port, err := net.SplitHostPort(listen); err == nil && port != trim(port) {
+		cfg.API.Listen = listen
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, redactEnvError(err, values)
+	}
+	return cfg, nil
+}
+
+// parseYAMLDocument retains the original nodes, comments and scalar spelling.
+func parseYAMLDocument(data []byte) (*yaml.Node, error) {
 	var document yaml.Node
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&document); err != nil {
@@ -42,42 +67,46 @@ func Parse(data []byte, path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("config must contain exactly one YAML document")
 	}
-	changed, values, err := expandEnvScalars(&document)
+	return &document, nil
+}
+
+// decodeConfig expands and strictly decodes a document, without semantic
+// validation. It mutates document; callers needing its raw values must retain
+// them before calling. Both parsing paths share decoding and error redaction.
+func decodeConfig(document *yaml.Node, path string) (*Config, map[string]struct{}, error) {
+	changed, values, err := expandEnvScalars(document)
 	if err != nil {
-		return nil, redactEnvError(err, values)
+		return nil, nil, redactEnvError(err, values)
 	}
-	if err := normalizeExpandedBooleans(&document, changed); err != nil {
-		return nil, redactEnvError(err, values)
+	if err := normalizeExpandedBooleans(document, changed); err != nil {
+		return nil, nil, redactEnvError(err, values)
 	}
-	expanded, err := yaml.Marshal(&document)
+	expanded, err := yaml.Marshal(document)
 	if err != nil {
-		return nil, redactEnvError(fmt.Errorf("encode YAML: %w", err), values)
+		return nil, nil, redactEnvError(fmt.Errorf("encode YAML: %w", err), values)
 	}
 
 	cfg := Default()
-	dec = yaml.NewDecoder(bytes.NewReader(expanded))
+	dec := yaml.NewDecoder(bytes.NewReader(expanded))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		if len(changed) > 0 {
 			err = fmt.Errorf("%w; environment-expanded scalars are strings (use YAML literals for numbers; booleans must expand to true or false)", err)
 		}
-		return nil, redactEnvError(fmt.Errorf("parse YAML: %w", err), values)
+		return nil, nil, redactEnvError(fmt.Errorf("parse YAML: %w", err), values)
 	}
-	if err := validateExpandedBooleanValues(&document, changed); err != nil {
-		return nil, redactEnvError(err, values)
+	if err := validateExpandedBooleanValues(document, changed); err != nil {
+		return nil, nil, redactEnvError(err, values)
 	}
 	cfg.Path = path
-	cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		return nil, redactEnvError(err, values)
-	}
-	return cfg, nil
+	return cfg, values, nil
 }
 
 // Normalize lower-cases enumerated values and fills per-element defaults.
 func (c *Config) Normalize() {
 	c.Log.Level = lowerTrim(c.Log.Level)
 	c.Log.Format = lowerTrim(c.Log.Format)
+	c.API.Listen = trim(c.API.Listen)
 	c.API.Token = trim(c.API.Token)
 	c.State.Path = trim(c.State.Path)
 	c.RouterOS.URL = trimRightSlash(trim(c.RouterOS.URL))

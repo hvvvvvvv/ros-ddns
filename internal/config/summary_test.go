@@ -45,6 +45,18 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+func TestSummaryUnsetRouterOS(t *testing.T) {
+	cfg := Default()
+	summary := Summary(cfg)
+	if !strings.Contains(summary, "routeros: (not configured)") || strings.Contains(summary, "[invalid URL]") {
+		t.Fatalf("summary renders unset RouterOS as invalid: %q", summary)
+	}
+	cfg.RouterOS.URL = "https://router.invalid"
+	if summary := Summary(cfg); !strings.Contains(summary, "routeros: https://router.invalid") {
+		t.Fatalf("summary changed configured RouterOS output: %q", summary)
+	}
+}
+
 func TestSummaryStripsURLQueryAndFragment(t *testing.T) {
 	for _, base := range []string{
 		"https://router.invalid", "https://router.invalid/base", "https://router.invalid:bad/base",
