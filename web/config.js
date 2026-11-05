@@ -184,12 +184,12 @@ export class Config {
   }
 
   routerSection() {
-    return section('02 / RouterOS', '连接 RouterOS REST API。URL 支持基础路径，服务端自动附加 /rest。', [grid(
-      this.field(['routeros', 'url'], { label: '路由器 URL', required: true, placeholder: 'https://192.168.88.1', help: '例如 https://192.168.88.1', validator: value => {
-        if (isReference(value)) return '';
+    return section('02 / RouterOS', '连接 RouterOS REST API。URL 支持基础路径，服务端自动附加 /rest。存在启用项目时必须填写 URL 和用户名；没有启用项目时可以留空。', [grid(
+      this.field(['routeros', 'url'], { label: '路由器 URL', placeholder: 'https://192.168.88.1', help: '例如 https://192.168.88.1；有启用项目时必填。', validator: value => {
+        if (!String(value).trim() || isReference(value)) return '';
         try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? '' : 'URL 需使用 http 或 https。'; } catch { return '请输入完整的 RouterOS URL。'; }
       } }),
-      this.field(['routeros', 'username'], { label: '用户名', required: true, placeholder: 'ddns-api' }),
+      this.field(['routeros', 'username'], { label: '用户名', placeholder: 'ddns-api', help: '有启用项目时必填。' }),
       this.field(['routeros', 'password'], { label: '密码', secret: true, help: '支持现有环境变量引用；不会显示在日志中。' }),
       this.duration(['routeros', 'timeout'], '请求超时', '10s', '10s'),
       this.field(['routeros', 'tls', 'caFile'], { label: 'CA 证书文件', placeholder: '/path/to/ca.pem', help: '服务端文件路径；留空使用系统证书。' }),
@@ -208,8 +208,8 @@ export class Config {
         grid(readOnlyField('服务商类型', this.providers[name]?.type || 'aliyun', '当前支持 aliyun。'),
           this.field([...prefix, 'endpoint'], { label: 'API endpoint', fallback: 'alidns.aliyuncs.com', placeholder: 'alidns.aliyuncs.com' }),
           this.field([...prefix, 'regionId'], { label: '地域 Region ID', fallback: 'cn-hangzhou', placeholder: 'cn-hangzhou' }),
-          this.field([...prefix, 'accessKeyId'], { label: 'AccessKey ID', secret: true, required: true }),
-          this.field([...prefix, 'accessKeySecret'], { label: 'AccessKey Secret', secret: true, required: true }),
+          this.field([...prefix, 'accessKeyId'], { label: 'AccessKey ID', secret: true, help: '可以稍后填写；缺失时同步会失败并重试。' }),
+          this.field([...prefix, 'accessKeySecret'], { label: 'AccessKey Secret', secret: true, help: '可以稍后填写；缺失时同步会失败并重试。' }),
           this.field([...prefix, 'securityToken'], { label: 'Security Token', secret: true, help: '可选，仅使用临时凭据时填写。' }),
           this.duration([...prefix, 'timeout'], '请求超时', '10s', '10s'),
           this.field([...prefix, 'qps'], { label: '请求速率 QPS', type: 'number', min: 1, step: 1, fallback: 5, help: '单位：请求 / 秒，必须为整数且不少于 1。默认 5。' })));
@@ -402,6 +402,12 @@ export class Config {
       else if (field.input.type === 'number' && value !== '' && (!Number.isFinite(Number(value)) || !field.input.validity.valid)) message = '请输入范围内的有效数值。';
       else if (field.validator) message = field.validator(value);
       if (message) errors.push({ path, message });
+    }
+    if (this.items.some(item => !item.disabled)) {
+      for (const [path, label] of [[['routeros', 'url'], '路由器 URL'], [['routeros', 'username'], '用户名']]) {
+        const field = this.fields.get(canonicalPath(path));
+        if (!field || !String(field.input.value).trim()) errors.push({ path, message: `存在启用项目时必须填写${label}。` });
+      }
     }
     const seen = new Set();
     this.items.forEach((item, index) => {
