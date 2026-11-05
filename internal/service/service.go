@@ -82,6 +82,7 @@ type Service struct {
 	redactor    *redact.Redactor
 	items       []*item // runnable enabled items, in config order
 	invalid     int     // enabled items rejected during tolerant startup
+	polling     bool    // at least one runnable enabled item needs RouterOS polling
 	ordered     []statusSlot
 	byName      map[string]*item
 	poller      *routerPoller
@@ -97,6 +98,9 @@ type statusSlot struct {
 // New accepts a normalized, validated config (normally from config.Load).
 // NewROS defaults to ros.NewRESTClient. NewProvider is required only when an
 // enabled item has DNS bindings. A nil State opens cfg.State.Path.
+// The RouterOS client and all polling start only when at least one runnable
+// enabled item exists; empty or all-disabled items leave Run idle (no client,
+// workers, list-renewal timers or family readers).
 // Tolerant keeps invalid items in Snapshot and lets valid items run; the config
 // must still have normalized, valid runtime intervals.
 func New(cfg *config.Config, deps Deps) (*Service, error) {
@@ -140,6 +144,7 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 	}
 	if deps.Tolerant {
 		s.configureTolerant(cfg, deps)
+		s.polling = len(s.items) > 0
 		s.poller = newRouterPoller(s)
 		return s, nil
 	}
@@ -182,7 +187,8 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 		s.ordered = append(s.ordered, statusSlot{item: it})
 		s.byName[c.Name] = it
 	}
-	if len(s.items) > 0 {
+	s.polling = len(s.items) > 0
+	if s.polling {
 		client, err := deps.NewROS(cfg.RouterOS)
 		if err != nil {
 			return nil, fmt.Errorf("create RouterOS client: %s", s.errorText(err))
@@ -205,6 +211,14 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	defer s.end()
+	// With no runnable enabled item there is nothing to poll: no RouterOS
+	// client was created, so do not start family readers, item workers or
+	// list-renewal timers. A later config change builds a new Service, which
+	// re-evaluates this condition.
+	if !s.polling {
+		<-ctx.Done()
+		return nil
+	}
 	// A reused Service must observe sources again before a new Run can act on
 	// queued work. Restore startup force after a prior canceled Run/runOnce.
 	for _, it := range s.items {

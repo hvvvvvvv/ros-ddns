@@ -65,6 +65,8 @@ flowchart TD
 
 配置分级中，`log`、`runtime`、`state`、`api` 是必须参数组，缺失或 `null` 通常使用默认值；`routeros`、`dns`、`items` 等可以不完整而不阻止启动。严格入口仍执行语义校验：无启用项时允许 routeros 全空，只校验已提供值的格式；有启用项时要求 URL、用户名并完整校验。禁用项只校验 name 非空、格式与全局唯一，允许未完成草稿；已定义 provider 仍校验 type / endpoint / timeout / qps，AK / Secret 可空，目标冲突只检查启用项。WebUI 保存与 PUT 不使用启动容忍路径。
 
+没有任何可运行启用项时（`items` 为空、全部禁用，或启动容忍下全部启用项都是 error），不创建 RouterOS 客户端，也不启动源轮询、列表续期或相关 timer goroutine；服务保持运行但不轮询。热重载到该状态会重建服务并停止旧代轮询，之后只有重新出现可运行启用项才会再次开始轮询。
+
 ## 3. 数据流与选址
 
 配置无 version；记录类型由 family 派生，只有 provider 使用 `type: aliyun`。有效启用项至少有一个 DNS 绑定或一个列表目标，禁用草稿可不完整。
