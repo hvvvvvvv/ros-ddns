@@ -6,6 +6,199 @@ import (
 	"testing"
 )
 
+func TestOptionalSectionsMayBeEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"omitted", "{}"},
+		{"log only", "log: {level: info}"},
+		{"empty", "routeros: {}\ndns: {providers: {}}\nitems: []"},
+		{"null", "routeros: null\ndns: null\nitems: null"},
+		{"empty credentials", "routeros: {url: '', username: '', password: ''}"},
+		{"disabled name only", "items: [{name: paused, disabled: true}]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.raw), "")
+			if err != nil {
+				t.Fatalf("Parse with empty optional settings: %v", err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate with empty optional settings: %v", err)
+			}
+		})
+	}
+}
+
+func TestRouterOSWithoutEnabledItems(t *testing.T) {
+	for _, tc := range []struct{ name, fields, want string }{
+		{"password only", "password: secret", ""},
+		{"URL only", "url: https://router.invalid", ""},
+		{"invalid URL", "url: 'https://['", "routeros.url: invalid URL"},
+		{"scheme", "url: ftp://router.invalid", "routeros.url: unsupported scheme"},
+		{"host", "url: https://:443", "routeros.url: host is required"},
+		{"userinfo", "url: https://user:secret@router.invalid", "routeros.url: userinfo is not allowed"},
+		{"nonnumeric port", "url: https://router.invalid:abc", "routeros.url: invalid URL"},
+		{"empty port", "url: 'https://router.invalid:'", "routeros.url: port must be"},
+		{"zero port", "url: https://router.invalid:0", "routeros.url: port must be"},
+		{"port range", "url: https://router.invalid:65536", "routeros.url: port must be"},
+		{"query", "url: 'https://router.invalid?x=y'", "routeros.url: query strings and fragments are not allowed"},
+		{"empty query", "url: 'https://router.invalid?'", "routeros.url: query strings and fragments are not allowed"},
+		{"fragment", "url: 'https://router.invalid#fragment'", "routeros.url: query strings and fragments are not allowed"},
+		{"empty fragment", "url: 'https://router.invalid#'", "routeros.url: query strings and fragments are not allowed"},
+		{"rest suffix", "url: https://router.invalid/base/rest/", "routeros.url: do not include /rest"},
+		{"zero timeout", "timeout: 0s", "routeros.timeout: must be greater than 0"},
+		{"negative timeout", "timeout: -1s", "routeros.timeout: must be greater than 0"},
+		{"TLS conflict", "tls: {insecureSkipVerify: true, caFile: test.pem}", "routeros.tls: insecureSkipVerify and caFile are mutually exclusive"},
+	} {
+		for _, items := range []struct{ name, raw string }{
+			{"no items", ""},
+			{"disabled only", "items: [{name: paused, disabled: true}]"},
+		} {
+			t.Run(tc.name+"/"+items.name, func(t *testing.T) {
+				raw := "routeros: {" + tc.fields + "}\n" + items.raw
+				_, err := Parse([]byte(raw), "")
+				if tc.want == "" {
+					if err != nil {
+						t.Fatalf("Parse without enabled items: %v", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("Parse error = %v, want %q", err, tc.want)
+				}
+				if strings.Contains(err.Error(), "must not be empty") {
+					t.Fatalf("unused RouterOS settings required credentials: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEnabledItemsRequireRouterOS(t *testing.T) {
+	const items = `items:
+  - name: paused
+    disabled: true
+  - name: active
+    source: {interface: wan, family: ipv4}
+    addressList: {list: ddns}
+`
+	for _, tc := range []struct{ name, routeros, want string }{
+		{"missing", "", "routeros.url: must not be empty"},
+		{"password only", "routeros: {password: secret}\n", "routeros.url: must not be empty"},
+		{"username missing", "routeros: {url: https://router.invalid}\n", "routeros.username: must not be empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.routeros+items), "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Parse with enabled item: error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDisabledItemsSkipOptionalFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		want         []string
+	}{
+		{"name only", "", []string{".source.interface:", ".source.family:", "at least one of domains or addressList is required"}},
+		{"invalid substructures", `    source:
+      family: other
+      eui64-mac: invalid
+      select: {scope: other, prefix: invalid, index: -1}
+    domains: [{provider: missing, domain: bad_domain, rr: bad*, ttl: 0}]
+    addressList: {list: '', timeout: invalid}
+`, []string{
+			".source.interface:", ".source.family:", ".source.eui64-mac:",
+			".source.select.scope:", ".source.select.prefix:", ".source.select.index:",
+			".domains[0].provider: unknown provider", ".domains[0].domain:", ".domains[0].rr:", ".domains[0].ttl:",
+			".addressList.list:", ".addressList.timeout:",
+		}},
+	} {
+		for _, disabled := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/disabled=%t", tc.name, disabled), func(t *testing.T) {
+				raw := "routeros: {url: https://router.invalid, username: ddns}\n" +
+					fmt.Sprintf("items:\n  - name: draft\n    disabled: %t\n", disabled) + tc.fields
+				cfg, err := Parse([]byte(raw), "")
+				if disabled {
+					if err != nil {
+						t.Fatalf("Parse disabled item: %v", err)
+					}
+					if err := cfg.Validate(); err != nil {
+						t.Fatalf("Validate disabled item: %v", err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatal("Parse accepted an incomplete enabled item")
+				}
+				for _, want := range tc.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("Parse error = %v, want %q", err, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDisabledItemNamesRemainValidated(t *testing.T) {
+	for _, name := range []string{"", "Invalid", "has space", "-prefix", strings.Repeat("a", 65)} {
+		t.Run(name, func(t *testing.T) {
+			raw := fmt.Sprintf("items: [{name: %q, disabled: true}]", name)
+			_, err := Parse([]byte(raw), "")
+			if err == nil || !strings.Contains(err.Error(), ".name:") || strings.Count(err.Error(), "\n - ") != 1 {
+				t.Fatalf("Parse error = %v, want only an item name error", err)
+			}
+		})
+	}
+}
+
+func TestItemNamesUniqueAcrossDisabledStates(t *testing.T) {
+	for _, firstDisabled := range []bool{false, true} {
+		for _, secondDisabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%t/%t", firstDisabled, secondDisabled), func(t *testing.T) {
+				raw := fmt.Sprintf(`routeros: {url: https://router.invalid, username: ddns}
+items:
+  - name: same
+    disabled: %t
+    source: {interface: wan, family: ipv4}
+    addressList: {list: first}
+  - name: same
+    disabled: %t
+    source: {interface: wan, family: ipv4}
+    addressList: {list: second}
+`, firstDisabled, secondDisabled)
+				_, err := Parse([]byte(raw), "")
+				const want = "invalid config:\n - items[1] (same).name: duplicate item name \"same\""
+				if err == nil || err.Error() != want {
+					t.Fatalf("Parse error = %v, want %s", err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestProvidersRemainValidatedWithoutEnabledItems(t *testing.T) {
+	for _, tc := range []struct{ name, fields, want string }{
+		{"credentials omitted", "type: aliyun", ""},
+		{"empty credentials", "type: aliyun, accessKeyId: '', accessKeySecret: ''", ""},
+		{"unsupported type", "type: other", "dns.providers.test.type:"},
+		{"zero timeout", "type: aliyun, timeout: 0s", "dns.providers.test.timeout:"},
+		{"zero QPS", "type: aliyun, qps: 0", "dns.providers.test.qps:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "dns: {providers: {test: {" + tc.fields + "}}}\nitems: [{name: paused, disabled: true}]"
+			_, err := Parse([]byte(raw), "")
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Parse with optional provider credentials: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Parse error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestAPIListenPortValidation(t *testing.T) {
 	for _, port := range []string{"", "-1", "0", "65536", "999999999999999999999", "http", "+80", " 80", "80 ", "80\t", "8 0", "80\n", "８０", "0x50", "80.0"} {
 		t.Run("invalid/"+port, func(t *testing.T) {

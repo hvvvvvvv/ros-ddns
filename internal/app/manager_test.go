@@ -362,7 +362,10 @@ func TestConfigDocumentValidationAndDormantApply(t *testing.T) {
 	if err := f.m.ValidateConfig(data); err != nil {
 		t.Fatal(err)
 	}
-	for _, invalid := range []string{"[]", "{}", `{"typo":true}`, "{} {}"} {
+	if err := f.m.ValidateConfig([]byte("{}")); err != nil {
+		t.Fatalf("empty configuration rejected: %v", err)
+	}
+	for _, invalid := range []string{"[]", `{"runtime":{"pollInterval":"0s"}}`, `{"typo":true}`, "{} {}"} {
 		if err := f.m.ValidateConfig([]byte(invalid)); err == nil {
 			t.Fatalf("ValidateConfig accepted %s", invalid)
 		}

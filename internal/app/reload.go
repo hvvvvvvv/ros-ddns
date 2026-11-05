@@ -91,6 +91,8 @@ func (m *Manager) ApplyConfig(ctx context.Context, baseHash string, data []byte)
 		return service.Snapshot{}, nil, fmt.Errorf("%w: %s", ErrRestartRequired, strings.Join(restartFields, ", "))
 	}
 	newDeps := oldDeps
+	// Startup tolerance must never weaken a configuration transaction.
+	newDeps.Tolerant = false
 	if newCfg.State.Path != oldCfg.State.Path {
 		newDeps.State = nil
 	}

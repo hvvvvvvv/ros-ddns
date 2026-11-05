@@ -276,7 +276,7 @@ func TestRecoveryFileIsLoadableByMainConfigLoad(t *testing.T) {
 		t.Fatalf("load generated default configuration: %v", err)
 	}
 	wantState := filepath.ToSlash(filepath.Join(filepath.Dir(path), "state.json"))
-	if cfg.State.Path != wantState || cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 1 {
+	if cfg.State.Path != wantState || cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 0 {
 		t.Fatalf("generated configuration = state.path %q (want %q) api.listen %q items %d", cfg.State.Path, wantState, cfg.API.Listen, len(cfg.Items))
 	}
 }

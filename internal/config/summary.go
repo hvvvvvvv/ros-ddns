@@ -12,8 +12,15 @@ import (
 func Summary(c *Config) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "config: %s\n", c.Path)
-	fmt.Fprintf(&b, "routeros: %s (user=%s, password=%s, tls.insecureSkipVerify=%t)\n",
-		redactURL(c.RouterOS.URL), c.RouterOS.Username, setState(c.RouterOS.Password), c.RouterOS.TLS.InsecureSkipVerify)
+	if c.RouterOS.URL == "" {
+		// RouterOS is optional until an item is enabled, so do not render the
+		// empty value as an invalid URL.
+		fmt.Fprintf(&b, "routeros: (not configured) user=%s password=%s tls.insecureSkipVerify=%t\n",
+			c.RouterOS.Username, setState(c.RouterOS.Password), c.RouterOS.TLS.InsecureSkipVerify)
+	} else {
+		fmt.Fprintf(&b, "routeros: %s (user=%s, password=%s, tls.insecureSkipVerify=%t)\n",
+			redactURL(c.RouterOS.URL), c.RouterOS.Username, setState(c.RouterOS.Password), c.RouterOS.TLS.InsecureSkipVerify)
+	}
 	fmt.Fprintf(&b, "runtime: pollInterval=%s stableFor=%s verifyInterval=%s syncOnStart=%t\n",
 		c.Runtime.PollInterval.Duration, c.Runtime.StableFor.Duration, c.Runtime.VerifyInterval.Duration, c.Runtime.SyncOnStart)
 	fmt.Fprintf(&b, "api: listen=%s token=%s\n", c.API.Listen, setState(c.API.Token))

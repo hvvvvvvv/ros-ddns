@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/instancelock"
 	"ros-ddns/internal/logging"
+	"ros-ddns/internal/notify"
 	"ros-ddns/internal/pathguard"
 	"ros-ddns/internal/svcmgr"
 	"ros-ddns/internal/version"
@@ -220,6 +222,10 @@ func TestRunRejectsPathCollisionsBeforeLockWrites(t *testing.T) {
 	defer router.Close()
 	for _, collision := range []string{"lock-config", "lock-backup", "lock-state", "state-config", "state-backup"} {
 		for _, mode := range [][]string{nil, {"-check"}} {
+			if len(mode) == 0 && strings.HasPrefix(collision, "state-") {
+				// Startup repairs state.path; -check must still reject it.
+				continue
+			}
 			t.Run(collision+fmt.Sprint(mode), func(t *testing.T) {
 				path := writeConfig(t, commandConfig(router.URL, "127.0.0.1:8080"))
 				statePath, lockPath := filepath.Join(filepath.Dir(path), "state.json"), filepath.Join(filepath.Dir(path), "instance.lock")
@@ -297,7 +303,7 @@ func withDaemonMode(t *testing.T, serviceManaged bool) *fakeDaemonService {
 	return fake
 }
 
-func TestRunServiceRecoveryWaitsForInstanceLock(t *testing.T) {
+func TestRunServiceAutofixWaitsForInstanceLock(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
 			clearDefaultConfigEnv(t)
@@ -311,7 +317,7 @@ func TestRunServiceRecoveryWaitsForInstanceLock(t *testing.T) {
 				args = append(args, "-lock-file", "custom.lock")
 			}
 			files := map[string][]byte{
-				path: []byte("routeros: [\n"), path + ".bak": []byte("backup sentinel"),
+				path: []byte("state: {path: state.json}\nlog: {level: verbose}\n"), path + ".bak": []byte("backup sentinel"),
 				filepath.Join(dir, "state.json"): []byte("state sentinel"),
 			}
 			for name, raw := range files {
@@ -345,6 +351,210 @@ func TestRunServiceRecoveryWaitsForInstanceLock(t *testing.T) {
 				t.Fatalf("contender started the daemon: %v", fake.calls)
 			}
 		})
+	}
+}
+
+func TestRunMalformedConfigurationIsFatalInBothModes(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		for _, tc := range []struct{ name, raw, message string }{
+			{"syntax", "routeros: [\n", "parse YAML"},
+			{"unknown", "unknown: true\n", "unknown"},
+			{"type", "api: {listen: []}\n", "parse YAML"},
+			{"listen", "api: {listen: bad-address}\n", "api.listen"},
+		} {
+			t.Run(fmt.Sprintf("service=%t/%s", serviceManaged, tc.name), func(t *testing.T) {
+				fake := withDaemonMode(t, serviceManaged)
+				path := writeConfig(t, tc.raw)
+				var stdout, stderr bytes.Buffer
+				want := 2
+				if serviceManaged {
+					want = 1
+				}
+				if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != want || !strings.Contains(stderr.String(), tc.message) {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				assertUnchangedStartupFile(t, path, tc.raw)
+				if files, err := os.ReadDir(filepath.Dir(path)); err != nil || len(files) != 1 || len(fake.calls) != 0 {
+					t.Fatalf("malformed configuration wrote files or started: files=%v calls=%v err=%v", files, fake.calls, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRunStateCollisionUsesRepairedLock(t *testing.T) {
+	for _, suffix := range []string{"", ".bak"} {
+		t.Run("state-config"+suffix, func(t *testing.T) {
+			fake := withDaemonMode(t, true)
+			path := writeConfig(t, "{}\n")
+			raw := fmt.Sprintf("state: {path: %q}\n", path+suffix)
+			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			wantLock, err := instanceLockPath("", config.Default().State.Path, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.onRun = func() error {
+				session := fake.program.(*serviceProgram).session.(*daemonSession)
+				if session.cfg.State.Path != config.Default().State.Path {
+					t.Fatalf("unrepaired state.path: %q", session.cfg.State.Path)
+				}
+				contender, err := instancelock.Acquire(wantLock, instancelock.Info{PID: -1})
+				if contender != nil {
+					_ = contender.Close()
+				}
+				if !errors.Is(err, instancelock.ErrLocked) {
+					t.Fatalf("effective fallback lock was not held: %v", err)
+				}
+				return nil
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+				t.Fatalf("code=%d calls=%v stderr=%q", code, fake.calls, stderr.String())
+			}
+			if backup, err := os.ReadFile(path + ".bak"); err != nil || string(backup) != raw {
+				t.Fatalf("original config backup = %q, %v", backup, err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := run(context.Background(), []string{"-config", path, "-check"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("repaired config failed -check: %d %s", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunServicePrintsGeneratedTokenOnceBeforeRedaction(t *testing.T) {
+	for _, level := range []string{"info", "error"} {
+		t.Run(level, func(t *testing.T) {
+			fake := withDaemonMode(t, true)
+			path := writeConfig(t, "state: {path: \"\"}\napi: {listen: '0.0.0.0:8080', token: ''}\nlog: {level: "+level+"}\n")
+			var stdout, stderr bytes.Buffer
+			var token string
+			fake.onRun = func() error {
+				session := fake.program.(*serviceProgram).session.(*daemonSession)
+				token = session.cfg.API.Token
+				decoded, err := hex.DecodeString(token)
+				if err != nil || len(decoded) != 32 {
+					t.Fatalf("generated token length=%d err=%v", len(decoded), err)
+				}
+				if !strings.Contains(stderr.String(), "generated api.token; printed once at startup") || strings.Count(stderr.String(), token) != 1 {
+					t.Fatal("generated token was not printed exactly once before redaction")
+				}
+				cfg, err := config.Load(path)
+				if err != nil || cfg.API.Token != token {
+					t.Fatalf("persisted token does not match runtime: %v", err)
+				}
+				events := session.opts.Notifications.History(0)
+				if len(events) != 1 || events[0].Kind != "config_autofix" || events[0].Severity != "warning" || !strings.Contains(events[0].Message, "api.token 已自动生成并写入配置，见启动日志") || strings.Contains(events[0].Message, token) {
+					t.Fatalf("token notification is missing or unsafe: %+v", events)
+				}
+				slog.Error("subsequent token log", "token", token)
+				if strings.Count(stderr.String(), token) != 1 || !strings.Contains(stderr.String(), "[redacted]") {
+					t.Fatal("subsequent logs are not redacted")
+				}
+				return nil
+			}
+			if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+				t.Fatalf("code=%d calls=%v stderr=%q", code, fake.calls, stderr.String())
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := run(context.Background(), []string{"-config", path, "-check"}, &stdout, &stderr); code != 0 || strings.Contains(stdout.String()+stderr.String(), token) {
+				t.Fatalf("-check code=%d stderr=%q", code, stderr.String())
+			}
+			if after, err := os.ReadFile(path); err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("-check changed repaired config: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunServiceReportsStartupFixups(t *testing.T) {
+	for _, mode := range []string{"literal", "environment", "write failure"} {
+		t.Run(mode, func(t *testing.T) {
+			fake := withDaemonMode(t, true)
+			raw := "state: {path: \"\"}\nlog: {level: verbose}\napi: {listen: ''}\n"
+			if mode == "environment" {
+				t.Setenv("STARTUP_LOG", "verbose")
+				t.Setenv("STARTUP_API", "")
+				raw = "state: {path: \"\"}\nlog: {level: '${STARTUP_LOG}'}\napi: {listen: '${STARTUP_API}'}\n"
+			}
+			path := writeConfig(t, raw)
+			if mode == "write failure" {
+				if err := os.Mkdir(path+".bak", 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake.onRun = func() error {
+				session := fake.program.(*serviceProgram).session.(*daemonSession)
+				if session.cfg.Log.Level != "info" || session.cfg.API.Listen != "127.0.0.1:8080" {
+					t.Fatal("daemon did not use fallback settings")
+				}
+				events := session.opts.Notifications.History(0)
+				if len(events) != 2 {
+					t.Fatalf("fixup events = %+v", events)
+				}
+				want := map[string]string{"log.level": "must be debug", "api.listen": "must not be empty"}
+				for _, event := range events {
+					if event.Kind != "config_autofix" || event.Severity != "warning" {
+						t.Fatalf("fixup event = %+v", event)
+					}
+					for path, reason := range want {
+						if strings.Contains(event.Message, path) && strings.Contains(event.Message, reason) {
+							delete(want, path)
+						}
+					}
+					status := "已回写配置"
+					if mode == "environment" {
+						status = "来自环境变量占位符，保留原文件"
+					}
+					if mode == "write failure" {
+						status = "未回写配置"
+					}
+					if !strings.Contains(event.Message, status) {
+						t.Fatalf("incorrect writeback status: %+v", event)
+					}
+				}
+				if len(want) != 0 {
+					t.Fatalf("missing fixup diagnostics: %v", want)
+				}
+				return nil
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+				t.Fatalf("code=%d calls=%v stderr=%q", code, fake.calls, stderr.String())
+			}
+			if strings.Count(stderr.String(), "configuration value is invalid; using default") != 2 {
+				t.Fatalf("missing startup warnings: %s", stderr.String())
+			}
+			if mode == "environment" {
+				assertUnchangedStartupFile(t, path, raw)
+			}
+			if mode == "write failure" && !strings.Contains(stderr.String(), "could not persist startup configuration fixes") {
+				t.Fatalf("write failure not logged: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestNotifyStartupConfigDoesNotClaimFailedTokenWrite(t *testing.T) {
+	cfg := config.Default()
+	cfg.API.Token = "startup-test-generated-token"
+	store := notify.NewStore(10)
+	defer store.Close()
+	notifyStartupConfig(store, &daemonConfig{
+		Config: cfg, WriteErr: errors.New("backup failed"),
+		Fixups: []config.Fixup{{Path: "api.token", Value: cfg.API.Token, Secret: true, Write: true, Reason: "token required"}},
+	})
+	events := store.History(0)
+	if len(events) != 1 || strings.Contains(events[0].Message, cfg.API.Token) || strings.Contains(events[0].Message, "已自动生成并写入") || !strings.Contains(events[0].Message, "未回写配置") {
+		t.Fatalf("failed token write notification = %+v", events)
 	}
 }
 
@@ -398,7 +608,7 @@ func TestRunMissingConfigRejectsPathCollisionsWithoutWrites(t *testing.T) {
 	}
 }
 
-func TestRunServiceConfigCannotNameHeldLock(t *testing.T) {
+func TestRunServiceRejectsLockMetadataAsConfiguration(t *testing.T) {
 	clearDefaultConfigEnv(t)
 	fake := withDaemonMode(t, true)
 	path := filepath.Join(t.TempDir(), "state.json.lock")
@@ -412,7 +622,7 @@ func TestRunServiceConfigCannotNameHeldLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "same file") {
+	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "parse YAML") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
@@ -431,6 +641,10 @@ func TestRunServiceFirstStartHoldsLock(t *testing.T) {
 	fake.onRun = func() error {
 		if _, err := config.Load(path); err != nil {
 			t.Fatalf("default config not ready at service start: %v", err)
+		}
+		events := fake.program.(*serviceProgram).session.(*daemonSession).opts.Notifications.History(0)
+		if len(events) != 1 || events[0].Kind != "configuration_default_created" || events[0].Severity != "warning" {
+			t.Fatalf("missing-config notification = %+v", events)
 		}
 		contender, err := instancelock.Acquire(lockPath, instancelock.Info{PID: -1})
 		if contender != nil {
@@ -452,18 +666,30 @@ func TestRunServiceFirstStartHoldsLock(t *testing.T) {
 	defer lock.Close()
 }
 
-func TestRunRecoveryRejectsChangedLockPath(t *testing.T) {
+func TestRunStartupNormalizesListenerWhitespace(t *testing.T) {
+	fake := withDaemonMode(t, true)
+	raw := "state: {path: ''}\napi: {listen: '127.0.0.1:8080 '}\n"
+	path := writeConfig(t, raw)
+	fake.onRun = func() error {
+		if got := fake.program.(*serviceProgram).session.(*daemonSession).cfg.API.Listen; got != "127.0.0.1:8080" {
+			t.Fatalf("listener = %q", got)
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"-config", path}, &stdout, &stderr); code != 0 || len(fake.calls) != 1 {
+		t.Fatalf("code=%d calls=%v stderr=%s", code, fake.calls, stderr.String())
+	}
+	assertUnchangedStartupFile(t, path, raw)
+}
+
+func TestRunDefaultConfigRejectsChangedLockPath(t *testing.T) {
 	for _, serviceManaged := range []bool{false, true} {
 		for _, state := range []string{"other-state.json", ""} {
 			t.Run(fmt.Sprintf("service=%t/state=%q", serviceManaged, state), func(t *testing.T) {
 				clearDefaultConfigEnv(t)
 				fake := withDaemonMode(t, serviceManaged)
 				path := filepath.Join(t.TempDir(), "config.yaml")
-				if serviceManaged {
-					if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
 				t.Setenv("ROS_DDNS_STATE_PATH", state)
 				var stdout, stderr bytes.Buffer
 				wantCode := 2
@@ -476,14 +702,14 @@ func TestRunRecoveryRejectsChangedLockPath(t *testing.T) {
 				}
 				cfg, err := config.Load(path)
 				if err != nil {
-					t.Fatalf("first recovery should write a loadable default: %v", err)
+					t.Fatalf("first start should write a loadable default: %v", err)
 				}
 				wantDefault, err := defaultConfigWithStatePath(filepath.Join(filepath.Dir(path), "state.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
 				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, wantDefault) {
-					t.Fatalf("unexpected recovery output: %q, %v", got, err)
+					t.Fatalf("unexpected default output: %q, %v", got, err)
 				}
 				otherLock, err := instanceLockPath("", cfg.State.Path, path)
 				if err != nil {
@@ -492,18 +718,9 @@ func TestRunRecoveryRejectsChangedLockPath(t *testing.T) {
 				if _, err := os.Stat(otherLock); !os.IsNotExist(err) {
 					t.Fatalf("startup acquired a second lock: %v", err)
 				}
-				wantQuarantines := 0
-				if serviceManaged {
-					wantQuarantines = 1
-				}
 				matches, err := filepath.Glob(path + ".invalid-*")
-				if err != nil || len(matches) != wantQuarantines || len(fake.calls) != 0 {
-					t.Fatalf("repeated recovery or daemon start: matches=%v calls=%v err=%v", matches, fake.calls, err)
-				}
-				if serviceManaged {
-					if got, err := os.ReadFile(matches[0]); err != nil || string(got) != "routeros: [\n" {
-						t.Fatalf("original invalid config not preserved: %q, %v", got, err)
-					}
+				if err != nil || len(matches) != 0 || len(fake.calls) != 0 {
+					t.Fatalf("unexpected quarantine or daemon start: matches=%v calls=%v err=%v", matches, fake.calls, err)
 				}
 			})
 		}
@@ -717,12 +934,13 @@ func TestLoggerLevelsAndFormats(t *testing.T) {
 	}
 }
 
-func TestRunInitializationError(t *testing.T) {
+func TestRunRouterOSInitializationFailureIsTolerated(t *testing.T) {
+	fake := withDaemonMode(t, true)
 	path := writeConfig(t, commandConfig("https://router.invalid", "127.0.0.1:8080"))
 	t.Setenv("W4_TEST_CA_FILE", filepath.ToSlash(filepath.Join(t.TempDir(), "missing-ca.pem")))
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-config", path}, &stdout, &stderr)
-	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "initialize service") {
+	if code != 0 || stdout.Len() != 0 || len(fake.calls) != 1 || strings.Contains(stderr.String(), "initialize service") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -795,7 +1013,13 @@ func TestRunInvalidAPIPort(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			var stdout, stderr bytes.Buffer
-			code := run(ctx, []string{"-config", path}, &stdout, &stderr)
+			args := []string{"-config", path}
+			if port == "8080 " {
+				// ParseStartup normalizes surrounding listener whitespace;
+				// the strict -check contract still rejects whitespace in a port.
+				args = append(args, "-check")
+			}
+			code := run(ctx, args, &stdout, &stderr)
 			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid config") || strings.Contains(stderr.String(), "listen HTTP API") {
 				t.Fatalf("code=%d stdout=%q stderr=%q, want config error before binding", code, stdout.String(), stderr.String())
 			}

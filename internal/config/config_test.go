@@ -256,13 +256,27 @@ items:
 	}
 }
 
-func TestNoItemsRejected(t *testing.T) {
-	_, err := loadString(t, "routeros:\n  url: https://192.168.88.1\n  username: ddns\n")
-	if err == nil {
-		t.Fatal("Load accepted a config without items")
-	}
-	if !strings.Contains(err.Error(), "at least one item") {
-		t.Fatalf("error = %v, want items error", err)
+func TestEmptyItemsAccepted(t *testing.T) {
+	const base = "routeros:\n  url: https://192.168.88.1\n  username: ddns\n"
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{"omitted", base},
+		{"explicitly empty", base + "dns:\n  providers: {}\nitems: []\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.yaml), filepath.Join(t.TempDir(), "config.yaml"))
+			if err != nil {
+				t.Fatalf("Parse without items or providers: %v", err)
+			}
+			if len(cfg.Items) != 0 || len(cfg.DNS.Providers) != 0 {
+				t.Fatalf("items=%d providers=%d, want 0 and 0", len(cfg.Items), len(cfg.DNS.Providers))
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate without items or providers: %v", err)
+			}
+		})
 	}
 }
 
@@ -343,10 +357,14 @@ items:
 	}
 }
 
-func TestAllItemsDisabledRejected(t *testing.T) {
+func TestAllItemsDisabledAccepted(t *testing.T) {
 	yaml := strings.Replace(minimalConfig, "name: wan-v6", "name: wan-v6\n    disabled: true", 1)
-	if _, err := loadString(t, yaml); err == nil || !strings.Contains(err.Error(), "at least one item must be enabled") {
-		t.Fatalf("error = %v, want all-disabled rejection", err)
+	cfg, err := loadString(t, yaml)
+	if err != nil {
+		t.Fatalf("Load rejected an all-disabled configuration: %v", err)
+	}
+	if len(cfg.Items) != 1 || !cfg.Items[0].Disabled {
+		t.Fatalf("items = %+v, want the only item disabled", cfg.Items)
 	}
 }
 

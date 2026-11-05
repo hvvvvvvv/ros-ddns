@@ -1,9 +1,11 @@
-# Default ros-ddns configuration, written on a daemon start when the configured
-# file does not exist (or when a service-managed start cannot load it).
+# ros-ddns 默认配置：仅在守护进程启动时发现配置文件缺失才生成，手动与服务方式相同。
+# YAML 语法或类型 / 解码错误会使启动失败，原文件保持不变。
+# 指定必须参数的显式非法语义值会在启动时修复并尝试回写，先备份为 .bak；
+# 环境占位符通常只在内存回退，非回环监听自动生成的 token 除外。
+# 仅包含基础设置；启动后通过 WebUI 添加 DNS 服务商、同步项目，或手工编辑配置。
 #
-# Every environment reference below has a default, so a service manager without
-# a shell environment still loads this file. Copy/edit it or use the WebUI;
-# Docker Compose can override the values through its env_file.
+# 以下环境引用均带默认值，服务管理器未提供变量时也可加载。
+# Docker Compose 可通过 env_file 注入变量。
 log:
   level: ${ROS_DDNS_LOG_LEVEL:-info}
   format: ${ROS_DDNS_LOG_FORMAT:-text}
@@ -17,13 +19,14 @@ runtime:
   maxBackoff: ${ROS_DDNS_MAX_BACKOFF:-5m}
 
 state:
-  # The generated file replaces the fallback below with an absolute path under
-  # the configuration directory; ROS_DDNS_STATE_PATH can override it.
+  # 生成文件会把下方默认路径替换为配置目录下的绝对路径；ROS_DDNS_STATE_PATH 可覆盖。
+  # 显式空字符串表示仅内存模式，合法且不会触发回写。
   path: ${ROS_DDNS_STATE_PATH:-state.json}
 
 api:
-  # Loopback by default. A container should set ROS_DDNS_LISTEN=0.0.0.0:8080 and
-  # a non-empty ROS_DDNS_API_TOKEN; api.listen/token/log.format changes need a restart.
+  # 默认回环监听。容器应设置 ROS_DDNS_LISTEN=0.0.0.0:8080，并预先提供合法非空 token。
+  # 非回环启动时 token 为空或非法会自动生成、尝试写回字面值，并在启动日志打印一次。
+  # 成功回写后 ROS_DDNS_API_TOKEN 不再覆盖该值；api.listen/token/log.format 修改需重启。
   listen: ${ROS_DDNS_LISTEN:-127.0.0.1:8080}
   token: ${ROS_DDNS_API_TOKEN:-}
 
@@ -33,36 +36,7 @@ routeros:
   password: ${ROS_PASSWORD:-}
   timeout: 10s
   tls:
-    # Enable this only for a self-signed router, or set caFile to a trusted PEM.
-    # If referenced from the environment, the expanded value must be true/false.
+    # 自签名路由器可开启此项，或设置 caFile 信任其 PEM CA；两者互斥。
+    # 若改为环境引用，展开值必须是 true/false。
     insecureSkipVerify: false
     caFile: ${ROS_DDNS_CA_FILE:-}
-
-dns:
-  providers:
-    ali-main:
-      type: aliyun
-      endpoint: alidns.aliyuncs.com
-      regionId: cn-hangzhou
-      accessKeyId: ${ALI_ACCESS_KEY_ID:-}
-      accessKeySecret: ${ALI_ACCESS_KEY_SECRET:-}
-      securityToken: ${ALI_SECURITY_TOKEN:-}
-      timeout: 10s
-      qps: 5
-
-items:
-  # Placeholder item: override the interface/domain from the environment or the
-  # WebUI. Failures are reported in the log and in-app notifications, and retried.
-  - name: home-ipv4
-    source:
-      interface: ${ROS_DDNS_INTERFACE:-pppoe-out1}
-      family: ipv4
-      select:
-        scope: public
-        index: 0
-    domains:
-      - provider: ali-main
-        domain: ${ROS_DDNS_DOMAIN:-example.com}
-        rr: home
-        ttl: 600
-        line: default
