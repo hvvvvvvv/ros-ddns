@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"time"
+
+	"ros-ddns/internal/logging"
 )
 
 func (it *item) wakeListRenewal() {
@@ -57,12 +60,18 @@ func (it *item) runListRenewal(ctx context.Context) {
 			return
 		case <-it.listWake:
 		case <-timerC:
+			it.mu.RLock()
+			name, list, desired := it.cfg.Name, it.cfg.AddressList.List, it.desired
+			it.mu.RUnlock()
+			slog.DebugContext(ctx, "address-list renewal timer fired", "item", name, "list", list, "address", desired)
 			it.renewList(ctx)
 		}
 	}
 }
 
 func (it *item) renewList(ctx context.Context) {
+	ctx, flushLogs := logging.WithDeferredLogs(ctx)
+	defer flushLogs() // listMu is released before any buffered log reaches slog.
 	it.listMu.Lock()
 	defer it.listMu.Unlock()
 	it.mu.Lock()
@@ -80,6 +89,8 @@ func (it *item) renewList(ctx context.Context) {
 	}
 	desired, revision := it.desired, it.revision
 	it.mu.Unlock()
+	logging.LogContext(ctx, slog.LevelInfo, "address-list renewal started", "item", it.cfg.Name,
+		"list", it.cfg.AddressList.List, "address", desired, "timeout", listTimeout(it.cfg.AddressList.Timeout))
 
 	listCtx, cancel := context.WithTimeout(ctx, it.service.runtime.ReconcileTimeout.Duration)
 	defer cancel()
@@ -90,5 +101,10 @@ func (it *item) renewList(ctx context.Context) {
 	}
 	it.refreshLocked()
 	it.mu.Unlock()
-	it.persist()
+	it.persist(ctx)
+	args := []any{"item", it.cfg.Name, "list", it.cfg.AddressList.List}
+	if err != nil {
+		args = append(args, "error", it.service.errorText(err))
+	}
+	logging.LogContext(ctx, slog.LevelDebug, "address-list renewal finished", args...)
 }

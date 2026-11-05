@@ -9,13 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"ros-ddns/internal/config"
+	"ros-ddns/internal/logging"
 )
 
 const (
@@ -176,6 +179,7 @@ func (c *restClient) Addresses(ctx context.Context, family Family) ([]Address, e
 			Deprecated:      routerOSBool(entry.Deprecated),
 		})
 	}
+	logging.LogContext(ctx, slog.LevelDebug, "RouterOS addresses fetched", "family", family, "count", len(addresses))
 	return addresses, nil
 }
 
@@ -201,6 +205,7 @@ func (c *restClient) ListEntries(ctx context.Context, family Family, list string
 			Disabled: routerOSBool(entry.Disabled),
 		})
 	}
+	logging.LogContext(ctx, slog.LevelDebug, "RouterOS address-list fetched", "family", family, "list", list, "count", len(result))
 	return result, nil
 }
 
@@ -262,7 +267,21 @@ func routerOSBool(value string) bool {
 	}
 }
 
-func (c *restClient) request(ctx context.Context, method, resource string, query url.Values, body, result any) error {
+func (c *restClient) request(ctx context.Context, method, resource string, query url.Values, body, result any) (requestErr error) {
+	started := time.Now()
+	status := 0
+	defer func() {
+		if requestErr != nil {
+			logging.LogContext(ctx, slog.LevelDebug, "RouterOS request failed", "method", method, "resource", resource,
+				"duration", time.Since(started), "error", requestLogError(requestErr))
+			return
+		}
+		args := []any{"method", method, "resource", resource, "status", status, "duration", time.Since(started)}
+		if len(query) > 0 {
+			args = append(args, "query", query.Encode())
+		}
+		logging.LogContext(ctx, slog.LevelDebug, "RouterOS request completed", args...)
+	}()
 	endpoint := c.baseURL + "/" + resource
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -294,6 +313,7 @@ func (c *restClient) request(ctx context.Context, method, resource string, query
 		return fmt.Errorf("RouterOS %s %s: %w", method, resource, err)
 	}
 	defer resp.Body.Close()
+	status = resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("RouterOS %s %s: %w", method, resource, decodeAPIError(resp))
 	}
@@ -305,6 +325,20 @@ func (c *restClient) request(ctx context.Context, method, resource string, query
 		return fmt.Errorf("decode RouterOS %s %s response: %w", method, resource, err)
 	}
 	return nil
+}
+
+// API errors may embed the raw response body, and url.Error includes the full
+// request URL. Log only safe classifications while preserving returned errors.
+func requestLogError(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return fmt.Sprintf("RouterOS HTTP %d: %s", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return requestLogError(urlErr.Err)
+	}
+	return err.Error()
 }
 
 func decodeAPIError(resp *http.Response) *APIError {

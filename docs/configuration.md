@@ -110,7 +110,7 @@ api:
 
 | 字段 | 类型 | 必填 | 缺省值 | 显式值规则与含义 |
 | --- | --- | --- | --- | --- |
-| `log.level` | string | 否 | `info` | `debug` / `info` / `warn` / `error`；空字符串无效 |
+| `log.level` | string | 否 | `info` | `debug` / `info` / `warn` / `error`；空字符串无效。`info` 输出首次 / 恢复轮询、源地址选择与变化、实际 DNS / 地址列表写入、手动同步排队等关键事件；`debug` 额外输出每次 RouterOS HTTP 请求（方法 / 资源 / 状态 / 耗时）、源轮询与选址决策、对账跳过原因、Aliyun 查询与无变化确认、地址列表逐项决策与续期计划 |
 | `log.format` | string | 否 | `text` | `text` / `json`；空字符串无效；日志写 stderr |
 | `runtime.pollInterval` | duration 字符串 | 否 | `10s` | 必须 > 0；显式零或负值无效 |
 | `runtime.stableFor` | duration 字符串 | 否 | `0s` | 必须 ≥ 0；零表示首次观察即可接受新值，正值在后续成功轮询时判定 |

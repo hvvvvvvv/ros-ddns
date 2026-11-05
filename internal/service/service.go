@@ -121,6 +121,25 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 	if deps.NewROS == nil {
 		deps.NewROS = ros.NewRESTClient
 	}
+	// Both strict startup and configureTolerant use these factories. Log only
+	// successful construction, including providers cached by tolerantProvider.
+	newROS := deps.NewROS
+	deps.NewROS = func(c config.RouterOSConfig) (ros.Client, error) {
+		client, err := newROS(c)
+		if err == nil && client != nil {
+			slog.Debug("RouterOS client initialized", "url", c.URL, "timeout", c.Timeout.Duration)
+		}
+		return client, err
+	}
+	if newProvider := deps.NewProvider; newProvider != nil {
+		deps.NewProvider = func(name string, c config.ProviderConfig) (dns.Provider, error) {
+			provider, err := newProvider(name, c)
+			if err == nil && provider != nil {
+				slog.Debug("DNS provider initialized", "provider", name, "type", c.Type, "endpoint", c.Endpoint)
+			}
+			return provider, err
+		}
+	}
 	s := &Service{
 		runtime: r, pollTimeout: cfg.RouterOS.Timeout.Duration,
 		configPath: cfg.Path, startedAt: deps.Now(),
@@ -216,9 +235,12 @@ func (s *Service) Run(ctx context.Context) error {
 	// list-renewal timers. A later config change builds a new Service, which
 	// re-evaluates this condition.
 	if !s.polling {
+		slog.InfoContext(ctx, "service started without RouterOS polling", "items", len(s.ordered), "invalid", s.invalid)
 		<-ctx.Done()
 		return nil
 	}
+	slog.InfoContext(ctx, "service started", "items", len(s.ordered), "runnable", len(s.items),
+		"families", len(s.poller.families), "pollInterval", s.runtime.PollInterval.Duration)
 	// A reused Service must observe sources again before a new Run can act on
 	// queued work. Restore startup force after a prior canceled Run/runOnce.
 	for _, it := range s.items {
@@ -271,10 +293,12 @@ func (s *Service) Snapshot() Snapshot {
 func (s *Service) TriggerItem(name string) bool {
 	it, ok := s.byName[name]
 	if !ok {
+		slog.Debug("manual synchronization ignored", "item", name)
 		return false
 	}
 	it.enqueue(true)
 	s.poller.reset()
+	slog.Info("manual synchronization queued", "item", name)
 	return true
 }
 

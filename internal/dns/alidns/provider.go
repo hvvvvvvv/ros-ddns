@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/dns"
+	"ros-ddns/internal/logging"
 )
 
 const (
@@ -99,10 +101,14 @@ func (p *provider) CloseIdleConnections() {
 }
 
 func (p *provider) Ensure(ctx context.Context, r dns.Record, recordIDHint string) (dns.EnsureResult, error) {
+	logging.LogContext(ctx, slog.LevelDebug, "ensuring Aliyun DNS record", "fqdn", r.FQDN(), "type", r.Type,
+		"value", r.Value, "ttl", r.TTL, "line", r.Line, "recordIdHint", recordIDHint != "")
 	matches, err := p.findRecords(ctx, r)
 	if err != nil {
 		return dns.EnsureResult{}, err
 	}
+	logging.LogContext(ctx, slog.LevelDebug, "Aliyun DNS records queried", "fqdn", r.FQDN(), "type", r.Type,
+		"line", r.Line, "matches", len(matches))
 	if len(matches) == 0 {
 		var id string
 		err := p.call(ctx, "AddDomainRecord", func() error {
@@ -113,7 +119,7 @@ func (p *provider) Ensure(ctx context.Context, r dns.Record, recordIDHint string
 		if err != nil {
 			return dns.EnsureResult{}, err
 		}
-		slog.InfoContext(ctx, "Aliyun DNS record added", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
+		logging.LogContext(ctx, slog.LevelInfo, "Aliyun DNS record added", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
 		return dns.EnsureResult{RecordID: id, Changed: true}, nil
 	}
 
@@ -130,7 +136,7 @@ func (p *provider) Ensure(ctx context.Context, r dns.Record, recordIDHint string
 			return dns.EnsureResult{}, fmt.Errorf("aliyun: %s %s line %q has %d matches: %w; remove duplicates or use a distinct line",
 				r.FQDN(), r.Type, r.Line, len(matches), dns.ErrAmbiguousRecord)
 		}
-		slog.WarnContext(ctx, "Multiple Aliyun DNS records match; using record ID hint", "fqdn", r.FQDN(), "type", r.Type,
+		logging.LogContext(ctx, slog.LevelWarn, "Multiple Aliyun DNS records match; using record ID hint", "fqdn", r.FQDN(), "type", r.Type,
 			"line", r.Line, "count", len(matches), "record_id", selected.RecordID)
 	}
 	return p.ensureRecord(ctx, r, selected)
@@ -187,9 +193,11 @@ func (p *provider) ensureRecord(ctx context.Context, r dns.Record, current remot
 		return dns.EnsureResult{}, errors.New("aliyun: matching record has an empty record ID; refusing to write")
 	}
 	if strings.EqualFold(current.Status, "DISABLE") {
-		slog.WarnContext(ctx, "Aliyun DNS record is disabled; preserving status", "fqdn", r.FQDN(), "type", r.Type, "record_id", current.RecordID)
+		logging.LogContext(ctx, slog.LevelWarn, "Aliyun DNS record is disabled; preserving status", "fqdn", r.FQDN(), "type", r.Type, "record_id", current.RecordID)
 	}
 	if normalizeValue(current.Value) == normalizeValue(r.Value) && current.TTL == int64(r.TTL) {
+		logging.LogContext(ctx, slog.LevelDebug, "Aliyun DNS record unchanged", "fqdn", r.FQDN(), "type", r.Type,
+			"record_id", current.RecordID, "value", r.Value, "ttl", r.TTL)
 		return dns.EnsureResult{RecordID: current.RecordID}, nil
 	}
 	var id string
@@ -201,7 +209,7 @@ func (p *provider) ensureRecord(ctx context.Context, r dns.Record, current remot
 	if err != nil {
 		return dns.EnsureResult{}, err
 	}
-	slog.InfoContext(ctx, "Aliyun DNS record updated", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
+	logging.LogContext(ctx, slog.LevelInfo, "Aliyun DNS record updated", "fqdn", r.FQDN(), "type", r.Type, "value", r.Value, "record_id", id)
 	return dns.EnsureResult{RecordID: id, Changed: true}, nil
 }
 
@@ -234,10 +242,26 @@ func (p *provider) call(ctx context.Context, operation string, fn func() error) 
 		if attempt+1 >= maxAttempts || !retryable(err) {
 			return fmt.Errorf("aliyun: %s: %w", operation, err)
 		}
-		if err := p.sleep(ctx, retryDelay(attempt)); err != nil {
+		delay := retryDelay(attempt)
+		logging.LogContext(ctx, slog.LevelDebug, "retrying Aliyun request", "operation", operation,
+			"attempt", attempt+1, "delay", delay, "error", requestLogError(err))
+		if err := p.sleep(ctx, delay); err != nil {
 			return fmt.Errorf("aliyun: %s backoff: %w", operation, err)
 		}
 	}
+}
+
+// SDK errors can include a response body. Retry diagnostics need only the code
+// and HTTP status, not the server's free-form error payload.
+func requestLogError(err error) string {
+	if code, status, ok := errorDetails(err); ok {
+		return fmt.Sprintf("%s (HTTP %d)", code, status)
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return requestLogError(urlErr.Err)
+	}
+	return err.Error()
 }
 
 func retryDelay(attempt int) time.Duration {

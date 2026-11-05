@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ros-ddns/internal/dns"
+	"ros-ddns/internal/logging"
 	"ros-ddns/internal/ros"
 )
 
@@ -35,6 +36,8 @@ func (it *item) sourceCurrent(desired string, revision uint64) bool {
 // reconcile is intentionally callable directly by in-package tests. Normal
 // source/retry work passes force=false; force checks every configured target.
 func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
+	ctx, flushLogs := logging.WithDeferredLogs(ctx)
+	defer flushLogs() // Registered before Unlock: all output happens outside item locks.
 	it.opMu.Lock()
 	defer it.opMu.Unlock()
 	it.mu.Lock()
@@ -52,6 +55,12 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 		it.refreshLocked()
 	}
 	it.mu.Unlock()
+	started := time.Now()
+	args := []any{"item", it.cfg.Name, "value", desired, "force", force, "domains", len(it.cfg.Domains)}
+	if it.cfg.AddressList != nil {
+		args = append(args, "list", it.cfg.AddressList.List)
+	}
+	logging.LogContext(ctx, slog.LevelDebug, "reconciliation started", args...)
 	ctx, cancel := context.WithTimeout(ctx, it.service.runtime.ReconcileTimeout.Duration)
 	defer cancel()
 	var failures []error
@@ -70,6 +79,8 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 			break
 		}
 		if skip {
+			logging.LogContext(ctx, slog.LevelDebug, "DNS record already confirmed; skipping", "item", it.cfg.Name,
+				"binding", i, "provider", binding.Provider, "fqdn", binding.FQDN(), "value", desired)
 			continue
 		}
 		record := dns.Record{
@@ -77,13 +88,18 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 			Value: desired, TTL: binding.TTL, Line: binding.Line,
 		}
 		var result dns.EnsureResult
+		ensureStarted := time.Now()
 		err := ctx.Err()
 		if err == nil {
 			// Only an actual attempt advances the cursor. The remaining
 			// targets still receive the shared timeout below, without calls.
 			it.nextDomain = (i + 1) % len(it.cfg.Domains)
+			logging.LogContext(ctx, slog.LevelDebug, "reconciling DNS record", "item", it.cfg.Name, "binding", i,
+				"provider", binding.Provider, "fqdn", binding.FQDN(), "type", record.Type, "value", desired,
+				"ttl", binding.TTL, "line", binding.Line, "recordIdHint", hint != "")
 			result, err = it.service.providers[binding.Provider].Ensure(ctx, record, hint)
 		}
+		duration := time.Since(ensureStarted)
 		it.mu.Lock()
 		if !it.sourceCurrentLocked(desired, revision) {
 			// The in-flight call may have changed the remote record. Even if
@@ -120,11 +136,11 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 		it.refreshLocked()
 		it.mu.Unlock()
 		if err != nil {
-			slog.Warn("DNS reconciliation failed", "item", it.cfg.Name, "binding", i,
-				"provider", binding.Provider, "fqdn", binding.FQDN(), "error", it.service.errorText(err))
+			logging.LogContext(ctx, slog.LevelWarn, "DNS reconciliation failed", "item", it.cfg.Name, "binding", i,
+				"provider", binding.Provider, "fqdn", binding.FQDN(), "error", it.service.errorText(err), "duration", duration)
 		} else {
-			slog.Info("DNS record reconciled", "item", it.cfg.Name, "binding", i,
-				"provider", binding.Provider, "fqdn", binding.FQDN(), "value", desired, "changed", result.Changed)
+			logging.LogContext(ctx, slog.LevelInfo, "DNS record reconciled", "item", it.cfg.Name, "binding", i,
+				"provider", binding.Provider, "fqdn", binding.FQDN(), "value", desired, "changed", result.Changed, "duration", duration)
 		}
 	}
 	if !stale && it.cfg.AddressList != nil {
@@ -144,6 +160,10 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 			}
 		}
 		it.listMu.Unlock()
+		if verified && !stale {
+			logging.LogContext(ctx, slog.LevelDebug, "address-list already verified; skipping", "item", it.cfg.Name,
+				"list", it.cfg.AddressList.List, "value", desired)
+		}
 	}
 	it.mu.Lock()
 	stale = stale || !it.sourceCurrentLocked(desired, revision)
@@ -155,14 +175,21 @@ func (it *item) reconcile(ctx context.Context, force bool) reconcileResult {
 	}
 	it.refreshLocked()
 	it.mu.Unlock()
-	if err := it.persist(); err != nil {
+	if err := it.persist(ctx); err != nil {
 		failures = append(failures, fmt.Errorf("persist state: %s", it.service.errorText(err)))
 	}
-	return reconcileResult{desired: desired, revision: revision, err: errors.Join(failures...)}
+	err := errors.Join(failures...)
+	args = []any{"item", it.cfg.Name, "duration", time.Since(started), "failures", len(failures)}
+	if err != nil {
+		args = append(args, "error", it.service.errorText(err))
+	}
+	logging.LogContext(ctx, slog.LevelDebug, "reconciliation finished", args...)
+	return reconcileResult{desired: desired, revision: revision, err: err}
 }
 
 // reconcileList requires listMu; both normal reconciliation and list-only
-// renewal hold it across the read, mutations and result publication.
+// renewal hold it across the read, mutations and result publication. The caller
+// owns the deferred log scope and flushes it after releasing its item locks.
 func (it *item) reconcileList(ctx context.Context, desired string) error {
 	it.mu.RLock()
 	revision := it.revision
@@ -177,15 +204,27 @@ func (it *item) reconcileList(ctx context.Context, desired string) error {
 // Normal reconciliation carries its captured source revision through DNS and
 // list work. The list-only caller captures a fresh revision in reconcileList.
 func (it *item) reconcileListRevision(ctx context.Context, desired string, revision uint64) error {
+	started := time.Now()
 	c := it.cfg.AddressList
 	family := ros.Family(it.cfg.Source.Family)
+	logging.LogContext(ctx, slog.LevelDebug, "address-list reconciliation started", "item", it.cfg.Name,
+		"family", family, "list", c.List, "address", desired, "timeout", listTimeout(c.Timeout))
+	logFinished := func(entries, failures int, renewAfter time.Duration) {
+		logging.LogContext(ctx, slog.LevelDebug, "address-list reconciliation finished", "item", it.cfg.Name,
+			"list", c.List, "entries", entries, "failures", failures, "renewAfter", renewAfter, "duration", time.Since(started))
+	}
 	if !it.sourceCurrent(desired, revision) {
+		logFinished(0, 1, 0)
 		return errSourceChanged
 	}
 	var entries []ros.ListEntry
 	err := ctx.Err()
 	if err == nil {
 		entries, err = it.service.client.ListEntries(ctx, family, c.List)
+	}
+	if err == nil {
+		logging.LogContext(ctx, slog.LevelDebug, "address-list fetched", "item", it.cfg.Name,
+			"family", family, "list", c.List, "entries", len(entries))
 	}
 	it.mu.Lock()
 	current := it.sourceCurrentLocked(desired, revision)
@@ -198,10 +237,12 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 	it.refreshLocked()
 	it.mu.Unlock()
 	if !current {
+		logFinished(len(entries), 1, 0)
 		return errors.Join(err, errSourceChanged)
 	}
 	if err != nil {
-		return it.setListResult(desired, revision, nil, false, err, 0)
+		logFinished(len(entries), 1, 0)
+		return it.setListResult(ctx, desired, revision, nil, false, err, 0)
 	}
 	// ListEntries is scoped by family/list; filter again to protect against a
 	// transport returning a broader result. A missing List is allowed for clients
@@ -213,6 +254,7 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 		}
 	}
 	entries = scoped
+	remainingCount := len(entries)
 	present := false
 	var renewAfter time.Duration
 	var failures []error
@@ -233,6 +275,8 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 				}
 			}
 			remaining = append(remaining, entry)
+			logging.LogContext(ctx, slog.LevelDebug, "address-list entry retained", "item", it.cfg.Name, "list", c.List,
+				"address", entry.Address, "entry_id", entry.ID, "reason", "foreign")
 			continue
 		}
 		if matches && !entry.Disabled && entry.Dynamic == (c.Timeout != "") && sameLifetime(c.Timeout, entry.Timeout) && !renew {
@@ -241,6 +285,8 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 				renewAfter = earlierRenewal(renewAfter, dynamicListRecheckDelay(entry.Timeout, it.service.runtime.VerifyInterval.Duration))
 			}
 			remaining = append(remaining, entry)
+			logging.LogContext(ctx, slog.LevelDebug, "address-list entry retained", "item", it.cfg.Name, "list", c.List,
+				"address", entry.Address, "entry_id", entry.ID, "reason", "valid")
 			continue
 		}
 		err := ctx.Err()
@@ -249,6 +295,7 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 		}
 		if err == nil {
 			if !it.sourceCurrent(desired, revision) {
+				logFinished(remainingCount, len(failures)+1, renewAfter)
 				return errors.Join(append(failures, errSourceChanged)...)
 			}
 			err = it.service.client.RemoveEntry(ctx, family, entry.ID)
@@ -256,6 +303,11 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 		if err != nil {
 			failures = append(failures, fmt.Errorf("remove entry %s: %s", entry.ID, it.service.errorText(err)))
 			remaining = append(remaining, entry)
+		} else {
+			remainingCount--
+			logging.LogContext(ctx, slog.LevelInfo, "address-list entry removed", "item", it.cfg.Name,
+				"family", family, "list", c.List, "address", entry.Address, "entry_id", entry.ID,
+				"reason", listRemovalReason(entry, desired, c.Timeout, renew))
 		}
 	}
 	// Complete stale removals before adding. A failed removal is retried, rather
@@ -265,6 +317,7 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 		err := ctx.Err()
 		if err == nil {
 			if !it.sourceCurrent(desired, revision) {
+				logFinished(remainingCount, 1, renewAfter)
 				return errSourceChanged
 			}
 			err = it.service.client.AddEntry(ctx, family, entry)
@@ -275,13 +328,40 @@ func (it *item) reconcileListRevision(ctx context.Context, desired string, revis
 			failures = append(failures, fmt.Errorf("add entry: %s", it.service.errorText(err)))
 		} else {
 			remaining = append(remaining, entry)
+			logging.LogContext(ctx, slog.LevelInfo, "address-list entry added", "item", it.cfg.Name, "family", family,
+				"list", c.List, "address", desired, "timeout", listTimeout(c.Timeout), "comment", c.Comment)
 			if c.Timeout != "" {
 				renewAfter = earlierRenewal(renewAfter, dynamicListRecheckDelay(c.Timeout, it.service.runtime.VerifyInterval.Duration))
 			}
 		}
 	}
 	err = errors.Join(failures...)
-	return it.setListResult(desired, revision, visibleEntries(remaining, c.Comment, desired), true, err, renewAfter)
+	logFinished(len(remaining), len(failures), renewAfter)
+	return it.setListResult(ctx, desired, revision, visibleEntries(remaining, c.Comment, desired), true, err, renewAfter)
+}
+
+func listTimeout(timeout string) string {
+	if timeout == "" {
+		return "static"
+	}
+	return timeout
+}
+
+func listRemovalReason(entry ros.ListEntry, desired, timeout string, renew bool) string {
+	switch {
+	case entry.Disabled:
+		return "entry-disabled"
+	case !addressMatches(entry.Address, desired):
+		return "address-changed"
+	case entry.Dynamic != (timeout != ""):
+		return "static-dynamic-mismatch"
+	case !sameLifetime(timeout, entry.Timeout):
+		return "timeout-mismatch"
+	case renew:
+		return "renewal"
+	default:
+		return "stale"
+	}
 }
 
 // visibleEntries shows managed entries plus any existing entry satisfying the
@@ -302,7 +382,7 @@ func visibleEntries(entries []ros.ListEntry, comment, desired string) []string {
 	return out
 }
 
-func (it *item) setListResult(desired string, revision uint64, entries []string, observed bool, err error, renewAfter time.Duration) error {
+func (it *item) setListResult(ctx context.Context, desired string, revision uint64, entries []string, observed bool, err error, renewAfter time.Duration) error {
 	it.mu.Lock()
 	if !it.sourceCurrentLocked(desired, revision) {
 		it.mu.Unlock()
@@ -334,10 +414,19 @@ func (it *item) setListResult(desired string, revision uint64, entries []string,
 		status.UpdatedAt = it.service.now()
 	}
 	it.refreshLocked()
+	entryCount := len(status.Entries)
 	it.mu.Unlock()
 	it.wakeListRenewal()
 	if err != nil {
-		slog.Warn("address-list reconciliation failed", "item", it.cfg.Name, "list", it.cfg.AddressList.List, "error", it.service.errorText(err))
+		logging.LogContext(ctx, slog.LevelWarn, "address-list reconciliation failed", "item", it.cfg.Name,
+			"family", it.cfg.Source.Family, "list", it.cfg.AddressList.List, "error", it.service.errorText(err))
+	} else {
+		logging.LogContext(ctx, slog.LevelDebug, "address-list confirmed", "item", it.cfg.Name,
+			"list", it.cfg.AddressList.List, "entries", entryCount, "renewAfter", renewAfter)
+		if renewAfter > 0 {
+			logging.LogContext(ctx, slog.LevelDebug, "address-list renewal scheduled", "item", it.cfg.Name,
+				"list", it.cfg.AddressList.List, "after", renewAfter)
+		}
 	}
 	return err
 }

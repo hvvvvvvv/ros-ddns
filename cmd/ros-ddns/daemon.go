@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ func (s *daemonSession) start(parent context.Context) error {
 		cancel()
 		return err
 	}
+	slog.InfoContext(ctx, "HTTP API listening", "address", listener.Addr().String(), "authRequired", s.cfg.API.Token != "")
 
 	s.mu.Lock()
 	s.apiDone = make(chan error, 1)
