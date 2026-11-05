@@ -12,6 +12,7 @@ import (
 
 	"ros-ddns/internal/config"
 	"ros-ddns/internal/eui64"
+	"ros-ddns/internal/logging"
 	"ros-ddns/internal/ros"
 	"ros-ddns/internal/state"
 )
@@ -135,8 +136,14 @@ func bindingKey(family string, d config.DomainConfig) string {
 // observe never passes a stale family snapshot to the selector after a failed
 // poll. A gap resets an uncommitted candidate's stability window, not desired.
 func (it *item) observe(addrs []ros.Address, pollErr error, observed, nextPoll time.Time) {
+	it.observeContext(context.Background(), addrs, pollErr, observed, nextPoll)
+}
+
+func (it *item) observeContext(ctx context.Context, addrs []ros.Address, pollErr error, observed, nextPoll time.Time) {
 	defer it.wakeListRenewal()
 	it.mu.Lock()
+	previousValid, previousError := it.sourceValid, it.sourceError
+	previousDesired, previousPhase := it.desired, it.sourcePhase
 	wasUsable := it.usableLocked()
 	it.status.NextPollAt = nextPoll
 	if pollErr != nil {
@@ -145,7 +152,9 @@ func (it *item) observe(addrs []ros.Address, pollErr error, observed, nextPoll t
 		it.candidate, it.valueSince = "", time.Time{}
 		it.refreshLocked()
 		it.mu.Unlock()
-		it.persist()
+		it.persist(ctx)
+		slog.DebugContext(ctx, "source poll failed for item", "item", it.cfg.Name, "family", it.cfg.Source.Family,
+			"error", it.service.errorText(pollErr))
 		return
 	}
 	it.sourceReady = true
@@ -188,7 +197,14 @@ func (it *item) observe(addrs []ros.Address, pollErr error, observed, nextPoll t
 		it.candidate, it.valueSince = "", time.Time{}
 		it.refreshLocked()
 		it.mu.Unlock()
-		it.persist()
+		it.persist(ctx)
+		args := []any{"item", it.cfg.Name, "family", it.cfg.Source.Family, "interface", it.cfg.Source.Interface,
+			"phase", phase, "error", it.service.errorText(err), "previousValid", previousValid, "previousPhase", previousPhase}
+		if previousError == "" {
+			slog.WarnContext(ctx, "source observation degraded", args...)
+		} else {
+			slog.DebugContext(ctx, "source observation still degraded", args...)
+		}
 		return
 	}
 	it.sourceValid, it.sourcePhase, it.sourceError = true, "", ""
@@ -208,11 +224,37 @@ func (it *item) observe(addrs []ros.Address, pollErr error, observed, nextPoll t
 		it.listRenewAt = time.Now()
 	}
 	trigger := usable && (changed || it.pendingForce || (!wasUsable && !it.syncedLocked()))
+	reason := "recovery"
+	if changed {
+		reason = "source-changed"
+	} else if it.pendingForce {
+		reason = "startup-force"
+	}
+	sourceAddress, candidate, desired := it.status.SourceAddress, it.candidate, it.desired
 	it.refreshLocked()
 	it.mu.Unlock()
-	it.persist()
+	it.persist(ctx)
 	if trigger {
 		it.enqueue(false)
+	}
+	if previousError != "" {
+		slog.InfoContext(ctx, "source observation recovered", "item", it.cfg.Name, "family", it.cfg.Source.Family,
+			"interface", it.cfg.Source.Interface, "value", value, "sourceAddress", sourceAddress)
+	}
+	slog.DebugContext(ctx, "source observed", "item", it.cfg.Name, "family", it.cfg.Source.Family,
+		"interface", it.cfg.Source.Interface, "sourceAddress", sourceAddress, "candidate", candidate,
+		"desired", desired, "changed", changed, "trigger", trigger)
+	if changed {
+		if previousDesired == "" {
+			slog.InfoContext(ctx, "source value selected", "item", it.cfg.Name, "family", it.cfg.Source.Family,
+				"interface", it.cfg.Source.Interface, "value", desired, "sourceAddress", sourceAddress)
+		} else {
+			slog.InfoContext(ctx, "source value changed", "item", it.cfg.Name, "family", it.cfg.Source.Family,
+				"interface", it.cfg.Source.Interface, "from", previousDesired, "to", desired, "sourceAddress", sourceAddress)
+		}
+	}
+	if trigger {
+		slog.DebugContext(ctx, "reconciliation queued", "item", it.cfg.Name, "reason", reason)
 	}
 }
 
@@ -297,7 +339,7 @@ func (it *item) run(ctx context.Context) {
 				wait := jitterBackoff(delay, it.service.runtime.MaxBackoff.Duration)
 				retry = time.NewTimer(wait)
 				retryC = retry.C
-				slog.Warn("reconciliation will retry", "item", it.cfg.Name, "after", wait, "error", result.err)
+				slog.WarnContext(ctx, "reconciliation will retry", "item", it.cfg.Name, "after", wait, "error", result.err)
 			} else {
 				delay, retryRevision = 0, current
 			}
@@ -380,7 +422,7 @@ func cloneStatus(status ItemStatus) ItemStatus {
 	return status
 }
 
-func (it *item) persist() error {
+func (it *item) persist(ctx context.Context) error {
 	// Lock before taking the snapshot so an earlier observation can never
 	// overwrite a newer reconciliation's cache from another goroutine.
 	it.persistMu.Lock()
@@ -412,7 +454,7 @@ func (it *item) persist() error {
 	it.refreshLocked()
 	it.mu.Unlock()
 	if err != nil {
-		slog.Warn("could not persist item state", "item", it.cfg.Name, "error", it.service.errorText(err))
+		logging.LogContext(ctx, slog.LevelWarn, "could not persist item state", "item", it.cfg.Name, "error", it.service.errorText(err))
 	}
 	return err
 }
