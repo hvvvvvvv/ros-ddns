@@ -37,7 +37,7 @@ STS 场景须配套提供 AccessKey ID、Secret 和 securityToken。程序使用
 
 ## 3. 环境变量、配置与 CLI
 
-首次启动生成的默认配置不含 DNS 服务商或同步项目，`dns.providers` 与 `items` 为空时守护进程仍可正常启动。打开 WebUI，在 Config 页添加 Aliyun 服务商并填写凭据，再到「同步项目」页添加接口与域名等信息，并保存应用。
+配置文件缺失时启动生成的默认配置不含 DNS 服务商或同步项目，`dns.providers`、`items` 为空或 items 全部禁用时守护进程仍可正常启动，无启用项时 routeros 也可全空。打开 WebUI，在 Config 页添加 Aliyun 服务商，AK / Secret 非必填，可稍后填写；在「同步项目」页添加接口与域名等信息，未完成的项目可停用并保存为草稿，启用项仍须完整校验。
 
 手工配置仍支持 `${VAR}` / `${VAR:-默认值}` 环境变量引用。以下凭据变量仅在配置中显式引用时读取；可配合后面的手写配置片段使用。程序不加载 `.env`，请由 shell 或进程管理器注入：
 
@@ -81,9 +81,9 @@ items:
         line: default
 ```
 
-缺省 endpoint、regionId、timeout、qps 分别是 `alidns.aliyuncs.com`、`cn-hangzhou`、`10s`、`5`。endpoint / regionId 去首尾空白后为空也会取默认值；显式 `timeout: 0s`、负 timeout、`qps: 0` 或负 qps 都无效。缺省 TTL 为 600，显式 `ttl: 0` 无效。
+缺省 endpoint、regionId、timeout、qps 分别是 `alidns.aliyuncs.com`、`cn-hangzhou`、`10s`、`5`。endpoint / regionId 去首尾空白后为空也会取默认值；严格校验拒绝显式 `timeout: 0s`、负 timeout、`qps: 0` 或负 qps。缺省 TTL 为 600，启用项显式 `ttl: 0` 无效。守护进程启动容忍这些语义问题，将相关启用项标为 error，而类型 / 解码错误（例如无法解析的 duration 或非整数 TTL）仍致命退出，原文件不变。
 
-provider 名是自定义实例名，多项引用同名实例共享客户端和限速。AK / Secret 允许为空：缺失或错误不会阻止守护进程启动，只在同步时记录错误并退避重试。未被引用的实例仍检查 type / timeout / qps 等，但不创建客户端。当前 type 只支持 aliyun，`domains[]` 不能填写记录 type。
+provider 名是自定义实例名，多项引用同名实例共享客户端和限速。AK / Secret 允许为空：缺失或错误不会阻止守护进程启动，只在同步时记录错误、页内通知并退避重试。严格校验仍检查所有已定义实例的 type / endpoint / timeout / qps，即使未被引用；未引用的实例不创建客户端。启动时 provider 无效或构造失败只将引用它的项标为 error，不轮询或触发，其余有效项继续，ready 为 false。当前 type 只支持 aliyun，`domains[]` 不能填写记录 type。
 
 环境变量在 YAML 解析后对标量展开，注释不展开；空格、`#`、冒号、引号和换行保留为字符串内容。已设置的空变量覆盖默认值，未设置的必需引用报错；数字字段必须用 YAML 字面量，布尔字段若用环境引用则展开值必须是 `true` / `false`。见 [完整配置规则](configuration.md#2-环境变量展开)。
 
@@ -99,7 +99,7 @@ Linux 对已构建程序使用：
 ./build/bin/ros-ddns -config build/configs/config.local.yaml -check
 ```
 
-`-check` 输出人类可读的文本摘要，不连接云端，也不创建或修改配置文件；它不能验证 AK、RAM 权限或阿里云套餐是否接受 TTL / line。`-once` 与 `-dry-run` 已移除：需要验证真实读取/写入时启动守护进程，并使用测试记录观察 WebUI 状态、日志与通知。
+`-check` 严格校验并输出人类可读的文本摘要，不连接云端、不获取锁、不修复或回写配置；启动本可自动修复的非法值也会被报告。启动修复后可再次检查磁盘配置，范围见 [配置参考](configuration.md#11-启动期自动修复与回写)。它不能验证 AK、RAM 权限或阿里云套餐是否接受 TTL / line。`-once` 与 `-dry-run` 已移除：需要验证真实读取/写入时启动守护进程，并使用测试记录观察 WebUI 状态、日志与通知。
 
 准备好测试目标后启动守护进程；运行时会实际对账，必要时新增 / 更新 DNS。正 stableFor 时需等待后续成功观察。条目错误与重试留在服务内，通过 WebUI、日志、通知和 status 的 phase / lastError 判断结果。
 
@@ -116,7 +116,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync \
   -H "Authorization: Bearer $ROS_DDNS_API_TOKEN"
 ```
 
-PowerShell 使用 `curl.exe` 和 `$env:ROS_DDNS_API_TOKEN`。未配置 token 时可省略认证头。检查 `items[].recordValue` 及 `domains[]` 中的 provider、fqdn、type、value、recordId、ttl、line、updatedAt、lastError。手动 sync 的 `202` 仅表示排队；ready 只证明源轮询曾成功，不能替代 DNS 成功。完整字段见 [状态结构](architecture.md#10-http-api-与状态结构)。
+PowerShell 使用 `curl.exe` 和 `$env:ROS_DDNS_API_TOKEN`。仅在回环监听且生效 token 为空时可省略认证头；非回环启动自动生成 token 时，请把当前启动日志中的值用于命令，程序不会替终端设置环境变量。检查 `items[].recordValue` 及 `domains[]` 中的 provider、fqdn、type、value、recordId、ttl、line、updatedAt、lastError。手动 sync 的 `202` 仅表示排队，禁用或配置错误项不可触发；ready 要求无启动配置错误项且所需源轮询曾成功，不能替代 DNS 成功。完整字段见 [状态结构](architecture.md#10-http-api-与状态结构)。
 
 ## 4. Upsert 与多义保护
 
@@ -139,7 +139,7 @@ DNS 状态为 `DISABLE` 时会告警，但程序不调用启用 / 禁用 API；�
 
 ## 5. TTL 与套餐限制
 
-缺省 `ttl: 600`，本地校验允许显式整数 1–86400 秒；显式零或负值会失败。阿里云免费版 / 个人版最低 TTL 为 600 秒，其他套餐能力需在账号中核对；本地通过的较小 TTL 不代表云端接受。[阿里云 TTL 说明](https://help.aliyun.com/zh/dns/pubz-how-to-modify-ttl-time)
+缺省 `ttl: 600`，启用项的本地语义校验允许显式整数 1–86400 秒；零或负值使严格校验失败，守护进程启动时该项为 error、不执行同步。禁用草稿不检查 TTL 范围，但非整数 TTL 等解码错误仍拒绝。阿里云免费版 / 个人版最低 TTL 为 600 秒，其他套餐能力需在账号中核对；本地通过的较小 TTL 不代表云端接受。[阿里云 TTL 说明](https://help.aliyun.com/zh/dns/pubz-how-to-modify-ttl-time)
 
 pollInterval、stableFor、请求耗时和退避决定何时更新权威记录；递归 DNS 和客户端缓存另外受旧 TTL 及自身策略影响。降低轮询间隔不能清除已有 DNS 缓存，也不能保证固定的全网生效上限。
 
@@ -151,7 +151,7 @@ pollInterval、stableFor、请求耗时和退避决定何时更新权威记录�
 
 例如将测试绑定从 default 改到账号支持的 telecom：程序查找相同 RR / 类型的 telecom 记录。已有唯一匹配则按需更新，没有匹配则新增；default 旧记录保留，即使缓存里有它的 RecordId，也不能拿该 ID 把另一线路迁移过来。云端手工把旧记录改到别的线路后，下次对账也遵守这条规则。
 
-静态重复键是 provider + domain + rr + 派生类型 + line，启用目标重复会拒绝加载。不同 provider 名即使使用同一账号也不会自动识别为相同远端，需避免多个实例争用记录。
+目标身份键是 provider + domain + rr + 派生类型 + line，冲突只检查启用项。`-check`、WebUI 保存和 PUT 会拒绝重复目标；守护进程启动将后出现的冲突项标为 error、不调度，其他有效项继续。不同 provider 名即使使用同一账号也不会自动识别为相同远端，需避免多个实例争用记录。
 
 ## 7. 限流、重试与请求预算
 
@@ -213,6 +213,7 @@ nslookup -type=AAAA home.example.com 223.5.5.5
 | 现象 | 检查方向 |
 | --- | --- |
 | AccessKey / Signature / 权限错误 | ID、Secret、STS 配套和过期时间、系统时间、RAM action / 资源范围 |
+| error 且提示配置错误 / provider 构造失败 | 核对启用项结构、provider 引用及 type / endpoint / timeout / qps；修正配置并成功保存或重启后重建，其他有效项可继续运行 |
 | TTL / line 拒绝 | 本地校验不检查套餐；免费 / 个人版 TTL 至少 600，使用账号支持线路 |
 | 多义记录 | 检查当前线路 RR / 类型的全部记录及缓存 ID，确认归属后人工整理 |
 | 换 line 后新增记录 | 新线路无匹配即新增，旧线路不会迁移或删除 |
@@ -226,8 +227,8 @@ nslookup -type=AAAA home.example.com 223.5.5.5
 
 凭据可在 WebUI 中填写并保存到配置，也可在手写配置中引用由进程环境或部署密钥注入的变量，避免提交真实 AK、RouterOS 密码或 API token。配置接受普通字符串，但环境展开能保留特殊字符，并对展开后的错误清洗。STS 需要自行管理更新和进程重启。
 
-Summary 不显示密钥值；服务对错误中的已配置密码、API token、AK / STS 做脱敏，覆盖原值、JSON 字符串转义及 URL query 转义表示，长匹配值按子串、短匹配值按有边界 token 处理。这覆盖配置凭据的上述表示，不保证任意上游内容或这些变体以外的编码形式都无秘密。正常日志与状态仍可能含域名、IP、RecordId。
+Summary 不显示密钥值；服务对错误中的已配置密码、API token、AK / STS 做脱敏，覆盖原值、JSON 字符串转义及 URL query 转义表示，长匹配值按子串、短匹配值按有边界 token 处理。这覆盖配置凭据的上述表示，不保证任意上游内容或这些变体以外的编码形式都无秘密。启动自动生成的 API token 在安装脱敏器之前打印一次，服务方式另写 OS 服务日志，须限制读取；通知不含 token 明文。正常日志与状态仍可能含域名、IP、RecordId。
 
-默认状态路径为 `./data/state.json`，相对进程工作目录，空路径只存内存。缓存不设置 provider 凭据字段，但保存 RecordId、确认值及已处理错误；限制文件、目录和日志权限。多实例使用独立路径。状态缺失会失去多义提示，不能把删除缓存当作通用修复。
+默认状态路径为 `./data/state.json`，相对进程工作目录；显式 `state.path: ""` 是合法的仅内存模式，缺失 / `null` 使用默认值。缓存打开失败在守护进程启动时 WARN 并退化为仅内存，继续运行。缓存不设置 provider 凭据字段，但保存 RecordId、确认值及已处理错误；限制文件、目录和日志权限。多实例使用独立路径。状态缺失或读取失败会失去多义提示，不能把删除缓存当作通用修复。
 
-API 默认 `127.0.0.1:8080`；非回环监听必须有非空 token，`/api/v1/*` 受 Bearer 保护，探针公开。通过 API 输出分享排障信息前，仍应检查域名、地址、RecordId 和路径的可见范围。
+API 默认 `127.0.0.1:8080`，回环 token 可空；非回环启动若 token 为空或非法会自动生成、尝试写回字面值并打印到启动日志，`/api/v1/*` 受 Bearer 保护，探针公开。成功回写会替换原环境占位符，之后修改原环境变量不再覆盖它；若希望通过环境变量管理，应在首次启动前提供合法非空 token。通过 API 输出分享排障信息前，仍应检查域名、地址、RecordId 和路径的可见范围。

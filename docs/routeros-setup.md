@@ -39,6 +39,8 @@ routeros:
 
 配置 URL 只写 origin 加可选基础路径，例如 `https://router.example.net/router`，客户端追加 `/rest`。hostname 必须非空；端口可省略，显式提供时须为十进制 1–65535，不能留空。userinfo、查询串、fragment、末尾 `/rest` 均会被拒绝；账号密码用独立字段。`routeros.timeout` 缺省为 `10s`，显式零或负值无效。
 
+这些是严格校验与实际同步的要求：没有启用项时 routeros 可缺失或全空，只校验已提供的 URL 格式、timeout > 0 和 TLS 互斥；有启用项时要求 URL、用户名并完整校验。守护进程启动不会因 RouterOS 配置不全或客户端构造失败退出，需要源读取的项进入轮询退避，每轮失败记录 WARN，并由页内通知报告错误，首次成功读取前 ready 为 false。配置或 CA 构造问题修正后需成功保存或重启，以重新构造客户端。
+
 ### 2.2 明文 www 仅用于隔离测试
 
 ```text
@@ -119,7 +121,7 @@ Linux 对已构建程序执行：
 echo $?
 ```
 
-`-check` 输出文本摘要，不联网，也不检查 CA 文件；它不创建或修改配置文件。`-once` 与 `-dry-run` 已移除，因此没有只读预演/单轮模式：需要读取真实 RouterOS 源地址时启动守护进程，在 WebUI / 日志中核对 sourceAddress、recordValue、phase 与 lastError（此时会进行真实对账，请使用测试目标）。
+`-check` 严格校验并输出文本摘要，不联网、不读取 CA 内容、不获取锁、不修复或回写配置；启动时本可自动修复的非法值也会使检查失败。守护进程启动修复范围见 [配置参考](configuration.md#11-启动期自动修复与回写)，启动后可再次检查磁盘配置。`-once` 与 `-dry-run` 已移除，因此没有只读预演/单轮模式：需要读取真实 RouterOS 源地址时启动守护进程，在 WebUI / 日志中核对 sourceAddress、recordValue、phase 与 lastError（此时会进行真实对账，请使用测试目标）。
 
 ### 5.3 实际同步与状态
 
@@ -139,7 +141,7 @@ curl.exe -sS http://127.0.0.1:8080/api/v1/status -H "Authorization: Bearer $env:
 curl.exe -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Authorization: Bearer $env:ROS_DDNS_API_TOKEN"
 ```
 
-未设置 token 时可省略 Authorization；设置后 `/api/v1/*` 必须认证。ready 的 `200 {"ready":true}` 只说明所有启用项曾成功读取源，无候选也算；同步应检查各项及各目标错误。sync 的 `202` 只表示排队，未知 / 禁用项为 `404`。完整响应见 [API 合同](architecture.md#10-http-api-与状态结构)。
+回环监听且生效 token 为空时可省略 Authorization；有 token 时 `/api/v1/*` 必须认证。非回环启动若 token 为空或非法会自动生成、尝试写回并在启动日志打印一次，服务方式还写 OS 服务日志；使用自动 token 时，应把当前日志中的值用于上述命令，程序不会替当前终端设置环境变量。ready 的 `200 {"ready":true}` 要求没有启动配置错误项，并且所有启用项曾成功读取源，无候选也算；同步应检查各项及各目标错误。sync 的 `202` 只表示排队，未知 / 禁用 / 配置错误项为 `404`。完整响应见 [API 合同](architecture.md#10-http-api-与状态结构)。
 
 ## 6. 地址列表生命周期
 
@@ -174,7 +176,7 @@ curl.exe -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Autho
 
 空 timeout 新增时不发送该参数，形成静态条目；有限 timeout 形成动态条目，会自然到期，重启后也会消失。静态条目保存在设备持久存储中。[MikroTik 地址列表持久性](https://help.mikrotik.com/docs/spaces/ROS/pages/130220135/Address-lists)
 
-`addressList.timeout` 在本地解析并检查时间语义：支持 `1h30m`、`1w2d3h4m5s`、`00:10:00`、`10:00` 和裸秒数 `3600`，时钟的分 / 秒必须小于 60，总时长不得超过 `35w3d13h13m56s`；`01:60`、`36w` 及溢出值会被拒绝。这仍不代表设备已接受。`0` / `0s` 允许加载且作为非空 timeout 发送，但不能据此安排有效的到期前续期；静态条目用空字符串，动态条目应配置正常正期限。完整规则见 [配置参考](configuration.md#38-itemsaddresslist)。
+启用项的 `addressList.timeout` 在本地解析并检查时间语义：支持 `1h30m`、`1w2d3h4m5s`、`00:10:00`、`10:00` 和裸秒数 `3600`，时钟的分 / 秒必须小于 60，总时长不得超过 `35w3d13h13m56s`；`01:60`、`36w` 及溢出值使严格校验失败，守护进程启动则将该项标为 error、不调度，其余有效项继续。这仍不代表设备已接受。`0` / `0s` 允许加载且作为非空 timeout 发送，但不能据此安排有效的到期前续期；静态条目用空字符串，动态条目应配置正常正期限。禁用草稿不检查列表语义，但仍须通过类型 / 解码检查。完整规则见 [配置参考](configuration.md#38-itemsaddresslist)。
 
 守护进程通常在配置正期限约一半时通过每项独立的列表专用 worker 读取列表、删除并重建受管动态项。续期不调用 DNS，也不等待 DNS 请求或退避；同项列表操作通过列表锁串行，刷新不会在每次源轮询都发生。续期失败以独立退避重试，不改变 DNS 重试时机。静态受管项没有续期定时器。外部 dynamic 匹配项通常按其返回期限约一半安排复查，不延长其寿命；到期消失后，如源仍可用，可创建自己的条目。动态期限为空、无法解析或不大于 `1ns` 时使用有界复查，默认 1 分钟，正 verifyInterval 更短时取其值。
 
@@ -188,7 +190,7 @@ curl.exe -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Autho
 
 如果 PD 前缀分配到 LAN bridge，应选择实际持有地址的接口；仅选择发起 PD 请求的 PPPoE 接口可能无候选。多前缀时可用 `select.prefix`，但固定旧前缀可能在运营商换前缀后失配。
 
-`eui64-mac` 可属于目标终端，不必等于源接口 MAC；前提是所选地址前 64 位与目标网段一致，终端确实使用该 EUI-64 IID。只支持 48 位、非全零单播 MAC，错误会阻止加载；程序不会回退到基础地址。
+`eui64-mac` 可属于目标终端，不必等于源接口 MAC；前提是所选地址前 64 位与目标网段一致，终端确实使用该 EUI-64 IID。只支持 48 位、非全零单播 MAC；启用项的非法 MAC 会被 `-check` / WebUI 保存 / PUT 拒绝，守护进程启动则保留该项为 error，停止其轮询与触发，其余有效项继续。程序不会回退到基础地址。
 
 | 测试向量 | 值 |
 | --- | --- |
@@ -229,6 +231,8 @@ curl.exe -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Autho
 | 连接超时 / 拒绝 | www-ssl、REST 端口、路由、input 链；不要用 native API 端口 |
 | RouterOS 401 / 403 | 密码、实际来源 IP、read / write / rest-api；GET 成功不代表写权限足够 |
 | TLS 失败 | CA、证书链、有效期、SAN 与 URL 主机；`-check` 不读证书 |
+| error 且提示配置错误 | 启用项的 source、MAC、目标及 provider 引用；修正后严格保存或重启，错误项不会参与轮询或手动同步 |
+| RouterOS 配置 / 构造错误持续重试 | 补全 URL、用户名，核对 timeout 与 TLS / CA；每轮 WARN 后退避，修正配置并成功保存或重启后重建客户端 |
 | waiting 且 no eligible address | interface / actual-interface、scope、prefix、index；WebUI / status 显示错误 |
 | 受管 disabled 或期限变化未修复 | 是否真正触发对账、源是否有效稳定、删除权限及列表 lastError |
 | foreign disabled 冲突 | 人工核实归属后启用或移除外部条目，程序保留它 |
@@ -236,4 +240,6 @@ curl.exe -sS -X POST http://127.0.0.1:8080/api/v1/items/home-ipv4/sync -H "Autho
 | 动态项消失 | 停机、重启、源失效、到期附近网络错误及退避；恢复后观察补回 |
 | AAAA 已写但不可达 | 目标是否实际配置合成地址、路由、防火墙和服务监听 |
 
-配置摘要隐藏凭据，服务对错误中的已配置密码、API token、AK / STS 的原值、JSON 字符串转义及 URL query 转义表示做脱敏，长匹配值按子串、短匹配值按边界 token 处理；展开错误也会清洗，但不保证任意上游文本或上述变体以外的编码形式都无秘密。日志、API 和默认 `./data/state.json` 仍可能含域名、IP、RecordId 等，需限制权限。API 默认回环监听，非回环必须有 token；状态路径和 API 端口应与其他进程隔离。
+配置摘要隐藏凭据，服务对错误中的已配置密码、API token、AK / STS 的原值、JSON 字符串转义及 URL query 转义表示做脱敏，长匹配值按子串、短匹配值按边界 token 处理；展开错误也会清洗，但不保证任意上游文本或上述变体以外的编码形式都无秘密。日志、API 和默认 `./data/state.json` 仍可能含域名、IP、RecordId 等，需限制权限。
+
+API 默认回环监听，token 可空；非回环启动时若 token 为空或非法会自动生成并尝试写回字面值，在安装日志脱敏器之前打印一次，服务方式另写 OS 服务日志，通知不含 token。成功回写会替换原环境占位符，若需通过环境变量管理，应预先设置合法非空 token。限制启动日志与配置 / `.bak` 的读取权限；状态路径和 API 端口应与其他进程隔离。状态缓存打开失败会 WARN 并退化为仅内存，启动成功不代表缓存已持久化。
