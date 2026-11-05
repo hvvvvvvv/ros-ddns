@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"ros-ddns/internal/atomicfile"
 	"ros-ddns/internal/config"
@@ -18,64 +17,35 @@ import (
 
 var errPrepareDefaultConfig = errors.New("prepare default configuration")
 
-// configRecovery describes how a daemon start handled a configuration that
-// could not be loaded.
-type configRecovery struct {
-	Quarantined string
-	LoadErr     error
-}
-
-// recoverConfig makes path loadable for a daemon start.
-//
-// A missing file is created from the embedded default configuration. An
-// existing but unloadable file is first preserved with an .invalid-<timestamp>
-// suffix so operator data is never lost, then replaced by the default. The
-// default contains only placeholders and no credentials.
-func recoverConfig(path string, cause error) (*configRecovery, error) {
-	recovery := &configRecovery{LoadErr: cause}
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("configuration path %s is not a regular file", path)
-		}
-		preserved := path + ".invalid-" + time.Now().Format("20060102150405")
-		for attempt := 1; ; attempt++ {
-			if _, statErr := os.Lstat(preserved); os.IsNotExist(statErr) {
-				break
-			}
-			preserved = fmt.Sprintf("%s.invalid-%s-%d", path, time.Now().Format("20060102150405"), attempt)
-		}
-		if err := os.Rename(path, preserved); err != nil {
-			return nil, fmt.Errorf("preserve unloadable configuration: %w", err)
-		}
-		recovery.Quarantined = preserved
-	case os.IsNotExist(err):
-	default:
-		return nil, fmt.Errorf("inspect configuration: %w", err)
-	}
-	if err := writeDefaultConfig(path); err != nil {
-		return nil, err
-	}
-	return recovery, nil
+// daemonConfig reports both the effective startup settings and any attempt to
+// persist their fallbacks. WriteErr never prevents use of Config in memory.
+type daemonConfig struct {
+	Config         *config.Config
+	Fixups         []config.Fixup
+	CreatedDefault bool
+	Written        bool
+	WriteErr       error
 }
 
 // daemonConfigLockPath checks every writable path before acquiring a lock or
-// recovering configuration. An unloadable config cannot supply a lock path, so
-// use the generated default's deterministic fallback, even if the environment
-// will override its state path. The effective lock is checked again after load.
+// repairing configuration. Only a missing config uses the generated default's
+// deterministic fallback. Malformed existing files are fatal in both modes.
 func daemonConfigLockPath(absConfigPath, explicit string, serviceManaged bool) (string, error) {
 	if serviceManaged {
 		if err := useConfigDirectory(absConfigPath, true); err != nil {
 			return "", err
 		}
 	}
-	cfg, loadErr := config.Load(absConfigPath)
+	raw, readErr := os.ReadFile(absConfigPath)
 	statePath := filepath.Join(filepath.Dir(absConfigPath), "state.json")
-	if loadErr == nil {
-		statePath = cfg.State.Path
-	} else if _, statErr := os.Stat(absConfigPath); !os.IsNotExist(statErr) && !serviceManaged {
-		return "", loadErr
+	if readErr == nil {
+		startup, err := config.ParseStartup(raw, absConfigPath)
+		if err != nil {
+			return "", err
+		}
+		statePath = startup.Config.State.Path
+	} else if !os.IsNotExist(readErr) {
+		return "", fmt.Errorf("read config: %w", readErr)
 	}
 	lockPath, err := instanceLockPath(explicit, statePath, absConfigPath)
 	if err != nil {
@@ -85,7 +55,7 @@ func daemonConfigLockPath(absConfigPath, explicit string, serviceManaged bool) (
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve instance lock path")
 	}
-	if loadErr != nil {
+	if readErr != nil {
 		statePath = recoveryStatePath(absConfigPath, serviceManaged)
 	}
 	if err := pathguard.Validate(absConfigPath, statePath, lockPath); err != nil {
@@ -122,53 +92,101 @@ func useConfigDirectory(absConfigPath string, allowMissing bool) error {
 	return nil
 }
 
-// prepareDaemonConfig loads configuration while the caller holds the lock. A missing
-// configuration file is replaced with the embedded default. A service-managed
-// start additionally preserves an unloadable configuration and replaces it with
-// the default; an interactive start reports the load error and exits, unless the
-// file is missing. serviceManaged selects the path behavior, where
-// relative configuration paths resolve against the configuration directory
-// instead of the service manager's working directory.
-func prepareDaemonConfig(absConfigPath string, serviceManaged bool, lock *instancelock.Lock) (*config.Config, *configRecovery, error) {
+// prepareDaemonConfig loads and repairs configuration while the caller holds
+// the instance lock. Only missing files are replaced with the embedded default.
+// Service-relative paths resolve against the configuration directory.
+func prepareDaemonConfig(absConfigPath string, serviceManaged bool, lock *instancelock.Lock) (*daemonConfig, error) {
 	if lock == nil {
-		return nil, nil, fmt.Errorf("%w: instance lock is required", errPrepareDefaultConfig)
+		return nil, fmt.Errorf("%w: instance lock is required", errPrepareDefaultConfig)
 	}
 	if serviceManaged {
 		if err := useConfigDirectory(absConfigPath, true); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
-	cfg, loadErr := config.Load(absConfigPath)
-	var recovery *configRecovery
-	if loadErr != nil {
-		missing := false
-		if _, statErr := os.Stat(absConfigPath); os.IsNotExist(statErr) {
-			missing = true
-		}
-		if !missing && !serviceManaged {
-			return nil, nil, loadErr
-		}
-		// Recheck immediately before writing: the configuration may have
-		// changed since the initial read used to select the held lock.
+	result := &daemonConfig{}
+	raw, err := os.ReadFile(absConfigPath)
+	if os.IsNotExist(err) {
+		// Recheck before creating the default, including environment overrides.
 		if err := pathguard.Validate(absConfigPath, recoveryStatePath(absConfigPath, serviceManaged), lock.Path()); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		var err error
-		recovery, err = recoverConfig(absConfigPath, loadErr)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %w", errPrepareDefaultConfig, err)
+		if err := writeDefaultConfig(absConfigPath); err != nil {
+			return nil, fmt.Errorf("%w: %w", errPrepareDefaultConfig, err)
 		}
+		result.CreatedDefault, result.Written = true, true
 		if serviceManaged {
 			if err := useConfigDirectory(absConfigPath, false); err != nil {
-				return nil, recovery, err
+				return nil, err
 			}
 		}
-		cfg, loadErr = config.Load(absConfigPath)
+		raw, err = os.ReadFile(absConfigPath)
 	}
-	if loadErr != nil {
-		return nil, recovery, fmt.Errorf("load configuration: %w", loadErr)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
-	return cfg, recovery, nil
+	startup, err := config.ParseStartup(raw, absConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("load configuration: %w", err)
+	}
+	result.Config, result.Fixups = startup.Config, startup.Fixups
+	if err := pathguard.Validate(absConfigPath, result.Config.State.Path, lock.Path()); err != nil {
+		return nil, err
+	}
+	if startup.NeedsWrite() {
+		result.WriteErr = writeStartupFixups(absConfigPath, raw, startup.Fixups)
+		if result.WriteErr == nil {
+			result.Written = true
+		}
+	}
+	return result, nil
+}
+
+// writeStartupFixups is called under the instance lock. Re-read before backing
+// up and again before replacement to preserve edits made by external tools.
+func writeStartupFixups(path string, raw []byte, fixups []config.Fixup) error {
+	unchanged := func() error {
+		current, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("re-read configuration before writeback: %w", err)
+		}
+		if !bytes.Equal(current, raw) {
+			return errors.New("configuration changed externally; skipped startup writeback")
+		}
+		return nil
+	}
+	if err := unchanged(); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect configuration permissions: %w", err)
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0600
+	}
+	if err := atomicfile.Write(path+".bak", raw, mode); err != nil {
+		return fmt.Errorf("back up configuration before writeback: %w", err)
+	}
+	updated, err := config.ApplyStartupFixups(raw, fixups)
+	if err != nil {
+		return fmt.Errorf("apply startup fixups: %w", err)
+	}
+	verified, err := config.ParseStartup(updated, path)
+	if err != nil {
+		return fmt.Errorf("verify startup fixups: %w", err)
+	}
+	if verified.NeedsWrite() {
+		return errors.New("verify startup fixups: writable fallbacks remain")
+	}
+	if err := unchanged(); err != nil {
+		return err
+	}
+	if err := atomicfile.Write(path, updated, mode); err != nil {
+		return fmt.Errorf("write startup fixups: %w", err)
+	}
+	return nil
 }
 
 // writeDefaultConfig atomically installs the embedded default configuration

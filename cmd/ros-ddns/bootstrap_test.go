@@ -2,7 +2,8 @@ package main
 
 import (
 	"bytes"
-	"errors"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,16 +15,24 @@ import (
 	"ros-ddns/internal/instancelock"
 )
 
-func prepareTestDaemonConfig(t *testing.T, path string, serviceManaged bool) (*config.Config, *configRecovery, error) {
+func prepareTestDaemonConfig(t *testing.T, path string, serviceManaged bool) (*daemonConfig, error) {
 	t.Helper()
+	if serviceManaged {
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(wd) })
+	}
 	lockPath, err := daemonConfigLockPath(path, "", serviceManaged)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	lock, err := instancelock.Acquire(lockPath, instancelock.Info{PID: os.Getpid()})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	t.Cleanup(func() { _ = os.Remove(lockPath) })
 	defer lock.Close()
 	return prepareDaemonConfig(path, serviceManaged, lock)
 }
@@ -31,26 +40,13 @@ func prepareTestDaemonConfig(t *testing.T, path string, serviceManaged bool) (*c
 func clearDefaultConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"ROS_DDNS_LISTEN",
-		"ROS_DDNS_API_TOKEN",
-		"ROS_DDNS_ROUTEROS_URL",
-		"ROS_DDNS_ROUTEROS_USERNAME",
-		"ROS_PASSWORD",
-		"ROS_DDNS_CA_FILE",
-		"ALI_ACCESS_KEY_ID",
-		"ALI_ACCESS_KEY_SECRET",
-		"ALI_SECURITY_TOKEN",
-		"ROS_DDNS_INTERFACE",
-		"ROS_DDNS_DOMAIN",
-		"ROS_DDNS_LOG_LEVEL",
-		"ROS_DDNS_LOG_FORMAT",
-		"ROS_DDNS_POLL_INTERVAL",
-		"ROS_DDNS_STABLE_FOR",
-		"ROS_DDNS_RECONCILE_TIMEOUT",
-		"ROS_DDNS_VERIFY_INTERVAL",
-		"ROS_DDNS_SYNC_ON_START",
-		"ROS_DDNS_MAX_BACKOFF",
-		"ROS_DDNS_STATE_PATH",
+		"ROS_DDNS_LISTEN", "ROS_DDNS_API_TOKEN", "ROS_DDNS_ROUTEROS_URL",
+		"ROS_DDNS_ROUTEROS_USERNAME", "ROS_PASSWORD", "ROS_DDNS_CA_FILE",
+		"ALI_ACCESS_KEY_ID", "ALI_ACCESS_KEY_SECRET", "ALI_SECURITY_TOKEN",
+		"ROS_DDNS_INTERFACE", "ROS_DDNS_DOMAIN", "ROS_DDNS_LOG_LEVEL",
+		"ROS_DDNS_LOG_FORMAT", "ROS_DDNS_POLL_INTERVAL", "ROS_DDNS_STABLE_FOR",
+		"ROS_DDNS_RECONCILE_TIMEOUT", "ROS_DDNS_VERIFY_INTERVAL", "ROS_DDNS_SYNC_ON_START",
+		"ROS_DDNS_MAX_BACKOFF", "ROS_DDNS_STATE_PATH",
 	} {
 		value, wasSet := os.LookupEnv(name)
 		t.Cleanup(func() {
@@ -70,19 +66,12 @@ func clearDefaultConfigEnv(t *testing.T) {
 	}
 }
 
-func TestRecoverConfigCreatesDefault(t *testing.T) {
+func TestWriteDefaultConfigCreatesDefault(t *testing.T) {
 	clearDefaultConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "nested")
 	path := filepath.Join(dir, "config.yaml")
-	recovery, err := recoverConfig(path, errors.New("read config: file does not exist"))
-	if err != nil {
+	if err := writeDefaultConfig(path); err != nil {
 		t.Fatal(err)
-	}
-	if recovery == nil || recovery.Quarantined != "" {
-		t.Fatalf("recovery = %+v, want created without quarantine", recovery)
-	}
-	if recovery.LoadErr == nil {
-		t.Fatal("recovery should keep the original load error for reporting")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -100,17 +89,13 @@ func TestRecoverConfigCreatesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated configuration does not load: %v", err)
 	}
-	wantState := filepath.ToSlash(filepath.Join(dir, "state.json"))
-	if cfg.State.Path != wantState {
-		t.Fatalf("generated state.path = %q, want %q", cfg.State.Path, wantState)
+	if want := filepath.ToSlash(filepath.Join(dir, "state.json")); cfg.State.Path != want {
+		t.Fatalf("state.path = %q, want %q", cfg.State.Path, want)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode := info.Mode().Perm(); mode != 0600 {
-			t.Fatalf("generated configuration mode = %04o, want 0600", mode)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("generated configuration permissions: %v, %v", info, err)
 		}
 	}
 }
@@ -118,9 +103,8 @@ func TestRecoverConfigCreatesDefault(t *testing.T) {
 func TestGeneratedStatePathEnvOverride(t *testing.T) {
 	clearDefaultConfigEnv(t)
 	t.Setenv("ROS_DDNS_STATE_PATH", "custom/state.json")
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if _, err := recoverConfig(path, errors.New("read config: file does not exist")); err != nil {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := writeDefaultConfig(path); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(path)
@@ -135,169 +119,245 @@ func TestGeneratedStatePathEnvOverride(t *testing.T) {
 	}
 }
 
-func TestRecoverConfigQuarantinesUnloadableFile(t *testing.T) {
-	clearDefaultConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	original := []byte("routeros: [\n")
-	if err := os.WriteFile(path, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	recovery, err := recoverConfig(path, errors.New("parse YAML: invalid"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovery == nil || recovery.Quarantined == "" {
-		t.Fatalf("recovery = %+v, want quarantined and created", recovery)
-	}
-	if !strings.HasPrefix(filepath.Base(recovery.Quarantined), "config.yaml.invalid-") {
-		t.Fatalf("quarantine path = %q", recovery.Quarantined)
-	}
-	preserved, err := os.ReadFile(recovery.Quarantined)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(preserved, original) {
-		t.Fatalf("quarantined bytes = %q, want %q", preserved, original)
-	}
-	current, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Equal(current, original) {
-		t.Fatal("configuration was not replaced by the default")
-	}
-	if _, err := config.Parse(current, path); err != nil {
-		t.Fatalf("replacement configuration does not load: %v", err)
+func TestPrepareDaemonConfigCreatesMissingDefault(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			clearDefaultConfigEnv(t)
+			dir := filepath.Join(t.TempDir(), "nested")
+			path := filepath.Join(dir, "config.yaml")
+			original, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := prepareTestDaemonConfig(t, path, serviceManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.CreatedDefault || !result.Written || result.WriteErr != nil || len(result.Fixups) != 0 {
+				t.Fatalf("startup = %+v", result)
+			}
+			cfg := result.Config
+			if cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 0 {
+				t.Fatalf("loaded default = api %q items %d", cfg.API.Listen, len(cfg.Items))
+			}
+			if want := filepath.ToSlash(filepath.Join(dir, "state.json")); cfg.State.Path != want {
+				t.Fatalf("state.path = %q, want %q", cfg.State.Path, want)
+			}
+			wantWD := original
+			if serviceManaged {
+				wantWD = dir
+			}
+			if wd, err := os.Getwd(); err != nil || wd != wantWD {
+				t.Fatalf("working directory = %q (err %v), want %q", wd, err, wantWD)
+			}
+		})
 	}
 }
 
-func TestRecoverConfigRejectsDirectory(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := recoverConfig(dir, errors.New("read config")); err == nil {
-		t.Fatal("recovering a directory path must fail")
+func TestPrepareDaemonConfigRepairsRequiredValues(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			raw := "# retain this comment\nstate: {path: \"\"}\nlog: {level: verbose}\napi: {listen: \"\"}\n"
+			path := writeConfig(t, raw)
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := prepareTestDaemonConfig(t, path, serviceManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.CreatedDefault || !result.Written || result.WriteErr != nil || len(result.Fixups) != 2 {
+				t.Fatalf("startup = %+v", result)
+			}
+			if result.Config.Log.Level != "info" || result.Config.API.Listen != "127.0.0.1:8080" {
+				t.Fatalf("effective config = %+v", result.Config)
+			}
+			want := map[string]string{"log.level": "info", "api.listen": "127.0.0.1:8080"}
+			for _, fixup := range result.Fixups {
+				if fixup.Value != want[fixup.Path] || !fixup.Write || fixup.Secret || fixup.Reason == "" {
+					t.Fatalf("fixup = %+v", fixup)
+				}
+				delete(want, fixup.Path)
+			}
+			if len(want) != 0 {
+				t.Fatalf("missing fixups: %v", want)
+			}
+			if backup, err := os.ReadFile(path + ".bak"); err != nil || string(backup) != raw {
+				t.Fatalf("backup = %q, %v", backup, err)
+			}
+			updated, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(updated, []byte("# retain this comment")) {
+				t.Fatalf("updated configuration = %q, %v", updated, err)
+			}
+			parsed, err := config.ParseStartup(updated, path)
+			if err != nil || len(parsed.Fixups) != 0 {
+				t.Fatalf("writeback still needs repair: %+v, %v", parsed, err)
+			}
+			for _, name := range []string{path, path + ".bak"} {
+				if info, err := os.Stat(name); err != nil || info.Mode().Perm() != before.Mode().Perm() {
+					t.Fatalf("writeback changed permissions of %s: %v, %v", name, info, err)
+				}
+			}
+		})
 	}
 }
 
-func TestPrepareDaemonConfigInteractiveKeepsWorkingDirectory(t *testing.T) {
-	clearDefaultConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	original, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(original) })
-
-	cfg, recovery, err := prepareTestDaemonConfig(t, path, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovery == nil || recovery.Quarantined != "" {
-		t.Fatalf("recovery = %+v", recovery)
-	}
-	if cfg.API.Listen != "127.0.0.1:8080" || len(cfg.Items) != 0 {
-		t.Fatalf("loaded default = api %q items %d", cfg.API.Listen, len(cfg.Items))
-	}
-	wantState := filepath.ToSlash(filepath.Join(dir, "state.json"))
-	if cfg.State.Path != wantState {
-		t.Fatalf("state.path = %q, want %q", cfg.State.Path, wantState)
-	}
-	if wd, err := os.Getwd(); err != nil || wd != original {
-		t.Fatalf("interactive start changed working directory to %q (err %v)", wd, err)
+func TestPrepareDaemonConfigKeepsInvalidEnvironmentPlaceholders(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			t.Setenv("STARTUP_LOG_LEVEL", "verbose")
+			t.Setenv("STARTUP_LISTEN", "")
+			raw := "state: {path: \"\"}\nlog: {level: '${STARTUP_LOG_LEVEL}'}\napi: {listen: '${STARTUP_LISTEN}'}\n"
+			path := writeConfig(t, raw)
+			result, err := prepareTestDaemonConfig(t, path, serviceManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Written || result.CreatedDefault || result.WriteErr != nil || len(result.Fixups) != 2 {
+				t.Fatalf("startup = %+v", result)
+			}
+			if result.Config.Log.Level != "info" || result.Config.API.Listen != "127.0.0.1:8080" {
+				t.Fatalf("effective config = %+v", result.Config)
+			}
+			for _, fixup := range result.Fixups {
+				if fixup.Write || fixup.Reason == "" {
+					t.Fatalf("environment fixup = %+v", fixup)
+				}
+			}
+			assertUnchangedStartupFile(t, path, raw)
+		})
 	}
 }
 
-func TestPrepareDaemonConfigServiceModeChangesWorkingDirectory(t *testing.T) {
-	clearDefaultConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	original, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+func assertUnchangedStartupFile(t *testing.T, path, raw string) {
+	t.Helper()
+	if got, err := os.ReadFile(path); err != nil || string(got) != raw {
+		t.Fatalf("startup changed the config: %q, %v", got, err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(original) })
-
-	if _, _, err := prepareTestDaemonConfig(t, path, true); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("startup unexpectedly created a backup: %v", err)
 	}
-	if wd, err := os.Getwd(); err != nil || wd != dir {
-		t.Fatalf("working directory = %q (err %v), want %q", wd, err, dir)
+	if matches, err := filepath.Glob(path + ".invalid-*"); err != nil || len(matches) != 0 {
+		t.Fatalf("startup quarantined the config: %v, %v", matches, err)
 	}
 }
 
-func TestPrepareDaemonConfigInteractiveRejectsInvalidConfiguration(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(original) })
-
-	if _, _, err := prepareTestDaemonConfig(t, path, false); err == nil {
-		t.Fatal("interactive daemon start must not replace an unloadable configuration")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != "routeros: [\n" {
-		t.Fatalf("interactive daemon start modified the existing configuration: %q", raw)
-	}
-	if matches, _ := filepath.Glob(path + ".invalid-*"); len(matches) != 0 {
-		t.Fatalf("interactive daemon start quarantined the configuration: %v", matches)
+func TestPrepareDaemonConfigRejectsMalformedConfiguration(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		for _, tc := range []struct{ name, raw, message string }{
+			{"syntax", "routeros: [\n", "parse YAML"},
+			{"unknown field", "runtime: {unknown: true}\n", "unknown"},
+			{"type", "runtime: {syncOnStart: [true]}\n", "parse YAML"},
+			{"duration type", "runtime: {pollInterval: wrong}\n", "duration"},
+			{"listen", "api: {listen: invalid}\n", "api.listen"},
+		} {
+			t.Run(fmt.Sprintf("service=%t/%s", serviceManaged, tc.name), func(t *testing.T) {
+				path := writeConfig(t, tc.raw)
+				if _, err := prepareTestDaemonConfig(t, path, serviceManaged); err == nil || !strings.Contains(err.Error(), tc.message) {
+					t.Fatalf("startup error = %v, want %q", err, tc.message)
+				}
+				assertUnchangedStartupFile(t, path, tc.raw)
+			})
+		}
 	}
 }
 
-func TestPrepareDaemonConfigServiceModeQuarantinesInvalidConfiguration(t *testing.T) {
-	clearDefaultConfigEnv(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("routeros: [\n"), 0600); err != nil {
-		t.Fatal(err)
+func TestPrepareDaemonConfigGeneratesPublicAPIToken(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			raw := "state: {path: \"\"}\napi: {listen: '0.0.0.0:8080', token: ''}\n"
+			path := writeConfig(t, raw)
+			result, err := prepareTestDaemonConfig(t, path, serviceManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := hex.DecodeString(result.Config.API.Token)
+			if err != nil || len(decoded) != 32 || !result.Written || result.WriteErr != nil {
+				t.Fatalf("token bytes=%d error=%v startup=%+v", len(decoded), err, result)
+			}
+			if len(result.Fixups) != 1 || !result.Fixups[0].Secret || !result.Fixups[0].Write || result.Fixups[0].Value != result.Config.API.Token {
+				t.Fatalf("token fixups = %+v", result.Fixups)
+			}
+			cfg, err := config.Load(path)
+			if err != nil || cfg.API.Token != result.Config.API.Token {
+				t.Fatalf("persisted token differs: %v", err)
+			}
+			if backup, err := os.ReadFile(path + ".bak"); err != nil || string(backup) != raw {
+				t.Fatalf("backup = %q, %v", backup, err)
+			}
+		})
 	}
-	original, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(original) })
+}
 
-	cfg, recovery, err := prepareTestDaemonConfig(t, path, true)
+func TestPrepareDaemonConfigWriteFailureIsNonFatal(t *testing.T) {
+	path := writeConfig(t, "state: {path: \"\"}\nlog: {level: verbose}\n")
+	if err := os.Mkdir(path+".bak", 0700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := prepareTestDaemonConfig(t, path, false)
+	if err != nil || result.WriteErr == nil || result.Written || result.Config.Log.Level != "info" {
+		t.Fatalf("write failure must retain in-memory defaults: %+v, %v", result, err)
+	}
+	if raw, err := os.ReadFile(path); err != nil || !bytes.Contains(raw, []byte("verbose")) {
+		t.Fatalf("write failure changed config: %q, %v", raw, err)
+	}
+}
+
+func TestWriteStartupFixupsPreservesConcurrentEdit(t *testing.T) {
+	raw := "state: {path: \"\"}\nlog: {level: verbose}\n"
+	path := writeConfig(t, raw)
+	startup, err := config.ParseStartup([]byte(raw), path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery == nil || recovery.Quarantined == "" {
-		t.Fatalf("recovery = %+v", recovery)
+	lock, err := instancelock.Acquire(filepath.Join(filepath.Dir(path), "instance.lock"), instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(recovery.Quarantined); err != nil {
-		t.Fatalf("quarantined configuration missing: %v", err)
+	defer lock.Close()
+	edited := raw + "# external edit\n"
+	if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if cfg == nil || len(cfg.Items) != 0 {
-		t.Fatalf("cfg = %+v", cfg)
+	if err := writeStartupFixups(path, []byte(raw), startup.Fixups); err == nil || !strings.Contains(err.Error(), "changed externally") {
+		t.Fatalf("concurrent edit was not detected: %v", err)
 	}
+	assertUnchangedStartupFile(t, path, edited)
 }
 
 func TestPrepareDaemonConfigRequiresLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "config.yaml")
-	if _, _, err := prepareDaemonConfig(path, false, nil); err == nil {
-		t.Fatal("configuration recovery accepted a missing instance lock")
+	if _, err := prepareDaemonConfig(path, false, nil); err == nil {
+		t.Fatal("configuration writeback accepted a missing instance lock")
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
-		t.Fatalf("configuration recovery created a directory without a lock: %v", err)
+		t.Fatalf("configuration writeback created a directory without a lock: %v", err)
 	}
 }
 
-func TestPrepareDaemonConfigRechecksRecoveryPathsUnderLock(t *testing.T) {
+func TestPrepareDaemonConfigRejectsDirectory(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := prepareTestDaemonConfig(t, path, serviceManaged); err == nil {
+				t.Fatal("configuration directory was accepted")
+			}
+			if files, err := os.ReadDir(path); err != nil || len(files) != 0 {
+				t.Fatalf("configuration directory changed: %v, %v", files, err)
+			}
+		})
+	}
+}
+
+func TestPrepareDaemonConfigRechecksMissingFilePathsUnderLock(t *testing.T) {
 	clearDefaultConfigEnv(t)
-	path := writeConfig(t, commandConfig("https://router.invalid", "127.0.0.1:8080"))
+	path := writeConfig(t, "state: {path: ''}\n")
 	t.Chdir(t.TempDir())
 	lockPath := filepath.Join(filepath.Dir(path), "instance.lock")
-	// This variable does not affect the existing config, but will affect the
-	// default if that config becomes unloadable after the initial read.
 	t.Setenv("ROS_DDNS_STATE_PATH", lockPath)
 	selected, err := daemonConfigLockPath(path, lockPath, true)
 	if err != nil {
@@ -308,18 +368,61 @@ func TestPrepareDaemonConfigRechecksRecoveryPathsUnderLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	broken := []byte("routeros: [\n")
-	if err := os.WriteFile(path, broken, 0600); err != nil {
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := prepareDaemonConfig(path, true, lock); err == nil || !strings.Contains(err.Error(), "same file") {
-		t.Fatalf("recovery under a conflicting held lock: %v", err)
+	if _, err := prepareDaemonConfig(path, true, lock); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Fatalf("default write with conflicting state/held lock: %v", err)
 	}
-	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, broken) {
-		t.Fatalf("recovery changed the config: %q, %v", got, err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("conflicting default was written: %v", err)
 	}
-	if matches, err := filepath.Glob(path + ".invalid-*"); err != nil || len(matches) != 0 {
-		t.Fatalf("recovery quarantined the config: %v, %v", matches, err)
+}
+
+func TestWriteStartupFixupsRejectsIncompleteRepair(t *testing.T) {
+	raw := "state: {path: ''}\nlog: {level: verbose}\n"
+	path := writeConfig(t, raw)
+	lock, err := instancelock.Acquire(filepath.Join(filepath.Dir(path), "instance.lock"), instancelock.Info{PID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	// An incomplete repair must never replace the original file even if its
+	// generated YAML is well formed and ParseStartup could repair it again.
+	fixups := []config.Fixup{{Path: "log.level", Value: "still-invalid", Write: true}}
+	if err := writeStartupFixups(path, []byte(raw), fixups); err == nil || !strings.Contains(err.Error(), "writable fallbacks remain") {
+		t.Fatalf("incomplete repair verification: %v", err)
+	}
+	for _, name := range []string{path, path + ".bak"} {
+		if got, err := os.ReadFile(name); err != nil || string(got) != raw {
+			t.Fatalf("original bytes lost in %s: %q, %v", name, got, err)
+		}
+	}
+}
+
+func TestPrepareDaemonConfigRechecksConfigurationUnderLock(t *testing.T) {
+	for _, serviceManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service=%t", serviceManaged), func(t *testing.T) {
+			path := writeConfig(t, "state: {path: \"\"}\n")
+			t.Chdir(t.TempDir())
+			selected, err := daemonConfigLockPath(path, filepath.Join(filepath.Dir(path), "instance.lock"), serviceManaged)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock, err := instancelock.Acquire(selected, instancelock.Info{PID: os.Getpid()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			broken := "routeros: [\n"
+			if err := os.WriteFile(path, []byte(broken), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := prepareDaemonConfig(path, serviceManaged, lock); err == nil || !strings.Contains(err.Error(), "parse YAML") {
+				t.Fatalf("malformed config under lock: %v", err)
+			}
+			assertUnchangedStartupFile(t, path, broken)
+		})
 	}
 }
 
@@ -344,8 +447,7 @@ func TestDaemonConfigLockPathPreservesSymlinkTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(base, "target", "instance.lock")
-	if got != want {
+	if want := filepath.Join(base, "target", "instance.lock"); got != want {
 		t.Fatalf("lock path = %q, want symlink-resolved %q", got, want)
 	}
 }

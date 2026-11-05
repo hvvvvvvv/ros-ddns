@@ -286,7 +286,12 @@ func withState(cfg *config.Config, deps service.Deps) (service.Deps, error) {
 	if cfg != nil && deps.State == nil {
 		store, err := state.Open(cfg.State.Path)
 		if err != nil {
-			return deps, fmt.Errorf("open service state: %s", redact.FromConfig(cfg).Replace(err.Error()))
+			message := redact.FromConfig(cfg).Replace(err.Error())
+			if !deps.Tolerant {
+				return deps, fmt.Errorf("open service state: %s", message)
+			}
+			slog.Warn("cannot open service state; using an in-memory cache", "error", message)
+			store, _ = state.Open("")
 		}
 		deps.State = store
 	}

@@ -84,7 +84,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
-	// Daemon configuration recovery runs only after path validation and locking.
+	// Daemon configuration writeback runs only after path validation and locking.
 	// -check remains read-only and does not initialize the service manager.
 	serviceManaged := !*check && !isInteractive()
 	activeConfigPath := *configPath
@@ -112,7 +112,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	var (
 		cfg      *config.Config
-		recovery *configRecovery
+		startup  *daemonConfig
 		lock     *instancelock.Lock
 		lockPath string
 	)
@@ -132,7 +132,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "ros-ddns: %v\n", err)
 			return 2
 		}
-		// Hold the same lock through configuration recovery and the entire run,
+		// Hold the same lock through configuration writeback and the entire run,
 		// even if state.path is later reloaded.
 		lock, err = instancelock.Acquire(lockPath, instancelock.Info{
 			PID: os.Getpid(), StartedAt: time.Now().UTC(), ConfigPath: absConfigPath, Version: version.Version,
@@ -145,7 +145,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "ros-ddns: release single-instance lock: %v\n", err)
 			}
 		}()
-		cfg, recovery, err = prepareDaemonConfig(absConfigPath, serviceManaged, lock)
+		startup, err = prepareDaemonConfig(absConfigPath, serviceManaged, lock)
 		if err != nil {
 			if serviceManaged {
 				return serviceFatal(serviceLogger, stderr, "%v", err)
@@ -156,6 +156,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}
 			return 2
 		}
+		cfg = startup.Config
 	}
 
 	effectiveLockPath, err := instanceLockPath(*lockFile, cfg.State.Path, activeConfigPath)
@@ -187,15 +188,24 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	slog.SetDefault(slog.New(logging.NewHandler(newBaseHandler(cfg.Log, stderr, levelVar), hub, levelVar)))
 	defer slog.SetDefault(previousLogger)
 	defer hub.Close()
+	// Startup warnings, especially a newly generated credential, must be visible
+	// even when the configured runtime log threshold is error.
+	configuredLevel := levelVar.Level()
+	if startup != nil && levelVar.Level() > slog.LevelWarn {
+		levelVar.Set(slog.LevelWarn)
+	}
+	logStartupFixups(startup, serviceLogger)
 	hub.SetRedactor(redact.FromConfig(cfg))
 
-	if recovery != nil {
-		if recovery.Quarantined != "" {
-			slog.Error("configuration could not be loaded; preserved it and wrote the default configuration",
-				"preserved", recovery.Quarantined, "error", recovery.LoadErr)
+	if startup != nil {
+		if startup.CreatedDefault {
+			slog.Warn("wrote default configuration; edit it or use the WebUI", "path", absConfigPath)
 		}
-		slog.Warn("wrote default configuration; edit it or use the WebUI", "path", absConfigPath)
+		if startup.WriteErr != nil {
+			slog.Warn("could not persist startup configuration fixes; using corrected values in memory", "error", startup.WriteErr)
+		}
 	}
+	levelVar.Set(configuredLevel)
 
 	if strings.HasPrefix(strings.ToLower(cfg.RouterOS.URL), "http://") {
 		slog.Warn("routeros.url uses http://; RouterOS credentials and traffic are unencrypted")
@@ -216,23 +226,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return alidns.New(pc)
 	}
 	deps := service.Deps{
-		NewROS: ros.NewRESTClient, NewProvider: factory,
+		NewROS: ros.NewRESTClient, NewProvider: factory, Tolerant: true,
 	}
 
 	notifications := notify.NewStore(200)
 	defer notifications.Close()
-	if recovery != nil {
-		notifications.Add(notify.Event{
-			Kind: "configuration_default_created", Severity: "warning",
-			Message: "配置文件缺失或无法加载，已生成默认配置；请编辑配置文件或使用 WebUI 完成配置。",
-		})
-		if recovery.Quarantined != "" {
-			notifications.Add(notify.Event{
-				Kind: "configuration_quarantined", Severity: "error",
-				Message: "原配置无法加载，已保留为 " + recovery.Quarantined + " 并生成默认配置。",
-			})
-		}
-	}
+	notifyStartupConfig(notifications, startup)
 
 	appOptions := app.Options{
 		LogHub: hub, LogLevel: levelVar, Notifications: notifications,
@@ -274,6 +273,64 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// Generated tokens are deliberately printed before the hub's redactor is set.
+// The OS service log also receives each fallback so a service-only deployment
+// can see why the effective configuration differs from the file.
+func logStartupFixups(startup *daemonConfig, serviceLogger svcmgr.Logger) {
+	if startup == nil {
+		return
+	}
+	for _, fixup := range startup.Fixups {
+		if fixup.Secret {
+			slog.Warn("generated api.token; printed once at startup", "token", fixup.Value)
+			if serviceLogger != nil {
+				_ = serviceLogger.Warningf("generated api.token: %s", fixup.Value)
+			}
+			continue
+		}
+		message := "configuration value is invalid; using default"
+		if !fixup.Write {
+			message += "; 来自环境变量占位符，保留原文件"
+		}
+		slog.Warn(message, "path", fixup.Path, "value", fixup.Value,
+			"reason", fixup.Reason, "written", fixup.Write)
+		if serviceLogger != nil {
+			_ = serviceLogger.Warningf("configuration value is invalid (path=%s reason=%s written=%t); using default", fixup.Path, fixup.Reason, fixup.Write)
+		}
+	}
+}
+
+func notifyStartupConfig(store *notify.Store, startup *daemonConfig) {
+	if startup == nil {
+		return
+	}
+	if startup.CreatedDefault {
+		store.Add(notify.Event{
+			Kind: "configuration_default_created", Severity: "warning",
+			Message: "配置文件缺失，已生成默认配置；请编辑配置文件或使用 WebUI 完成配置。",
+		})
+	}
+	r := redact.FromConfig(startup.Config)
+	for _, fixup := range startup.Fixups {
+		written := fixup.Write && startup.Written && startup.WriteErr == nil
+		status := "已回写配置"
+		if !fixup.Write {
+			status = "来自环境变量占位符，保留原文件，未回写"
+		} else if !written {
+			status = "回写失败，仅在内存中生效，未回写配置"
+		}
+		message := fmt.Sprintf("%s：%s；已使用默认值；%s。", fixup.Path, fixup.Reason, status)
+		if fixup.Secret {
+			message = "api.token 已自动生成并写入配置，见启动日志。"
+			if !written {
+				message = "api.token 已自动生成，见启动日志；" + status + "。"
+			}
+			message += "原因：" + fixup.Reason
+		}
+		store.Add(notify.Event{Kind: "config_autofix", Severity: "warning", Message: r.Replace(message)})
+	}
 }
 
 // instanceLockPath uses the explicit override, then the initial state path.

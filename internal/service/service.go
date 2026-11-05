@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 )
 
 type Deps struct {
+	Tolerant    bool // keep invalid startup items visible without running them
 	NewROS      func(config.RouterOSConfig) (ros.Client, error)
 	NewProvider func(name string, cfg config.ProviderConfig) (dns.Provider, error)
 	Selector    func([]ros.Address, ros.SelectOptions) (ros.Selection, error) // must be concurrency-safe
@@ -78,7 +80,8 @@ type Service struct {
 	providers   map[string]dns.Provider
 	store       *state.Store
 	redactor    *redact.Redactor
-	items       []*item // enabled items, in config order
+	items       []*item // runnable enabled items, in config order
+	invalid     int     // enabled items rejected during tolerant startup
 	ordered     []statusSlot
 	byName      map[string]*item
 	poller      *routerPoller
@@ -87,13 +90,15 @@ type Service struct {
 }
 
 type statusSlot struct {
-	item     *item
-	disabled ItemStatus
+	item   *item
+	static ItemStatus // disabled items and tolerant startup errors
 }
 
 // New accepts a normalized, validated config (normally from config.Load).
 // NewROS defaults to ros.NewRESTClient. NewProvider is required only when an
 // enabled item has DNS bindings. A nil State opens cfg.State.Path.
+// Tolerant keeps invalid items in Snapshot and lets valid items run; the config
+// must still have normalized, valid runtime intervals.
 func New(cfg *config.Config, deps Deps) (*Service, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -126,8 +131,17 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 		var err error
 		s.store, err = state.Open(cfg.State.Path)
 		if err != nil {
-			return nil, fmt.Errorf("open service state: %s", s.errorText(err))
+			if !deps.Tolerant {
+				return nil, fmt.Errorf("open service state: %s", s.errorText(err))
+			}
+			slog.Warn("could not open service state; using an in-memory cache", "error", s.errorText(err))
+			s.store, _ = state.Open("")
 		}
+	}
+	if deps.Tolerant {
+		s.configureTolerant(cfg, deps)
+		s.poller = newRouterPoller(s)
+		return s, nil
 	}
 	seenNames := make(map[string]bool)
 	for _, original := range cfg.Items {
@@ -137,7 +151,7 @@ func New(cfg *config.Config, deps Deps) (*Service, error) {
 		}
 		seenNames[c.Name] = true
 		if c.Disabled {
-			s.ordered = append(s.ordered, statusSlot{disabled: initialStatus(c)})
+			s.ordered = append(s.ordered, statusSlot{static: initialStatus(c)})
 			continue
 		}
 		if !ros.Family(c.Source.Family).Valid() {
@@ -225,21 +239,21 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// Snapshot returns a deep copy in config order, including disabled items.
+// Snapshot returns a deep copy in config order, including disabled/error items.
 func (s *Service) Snapshot() Snapshot {
 	out := Snapshot{ConfigPath: s.configPath, StartedAt: s.startedAt, Items: make([]ItemStatus, 0, len(s.ordered))}
 	for _, slot := range s.ordered {
 		if slot.item != nil {
 			out.Items = append(out.Items, slot.item.snapshot())
 		} else {
-			out.Items = append(out.Items, cloneStatus(slot.disabled))
+			out.Items = append(out.Items, cloneStatus(slot.static))
 		}
 	}
 	return out
 }
 
 // TriggerItem queues a force reconciliation and resets polling backoff. Unknown
-// and disabled items return false. Requests coalesce while work is in flight.
+// and disabled/invalid items return false. Requests coalesce while work is in flight.
 func (s *Service) TriggerItem(name string) bool {
 	it, ok := s.byName[name]
 	if !ok {
@@ -253,6 +267,9 @@ func (s *Service) TriggerItem(name string) bool {
 // Ready requires a successful fresh poll for every enabled item's family. A
 // successful poll with no eligible address counts; disk state never counts.
 func (s *Service) Ready() bool {
+	if s.invalid > 0 {
+		return false
+	}
 	for _, it := range s.items {
 		it.mu.RLock()
 		ready := it.sourceReady
