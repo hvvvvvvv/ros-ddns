@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img">
+  <title>ros-ddns</title>
+  <defs>
+    <linearGradient id="ros-ddns-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a8a7c"/>
+      <stop offset="1" stop-color="#05625a"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#ros-ddns-tile)"/>
+  <rect x="2.5" y="2.5" width="507" height="507" rx="125.5" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="3"/>
+  <g fill="none" stroke="#fff" stroke-width="46" stroke-linecap="round">
+    <path d="M115.1 204.7 A150 150 0 0 1 397 204.7"/>
+    <path d="M397 307.3 A150 150 0 0 1 115.1 307.3"/>
+  </g>
+  <path d="M416.2 257.3 L359.2 212.4 L430.6 186.4 Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M95.8 254.7 L152.8 299.6 L81.4 325.6 Z" fill="#fff" stroke="#fff" stroke-width="12" stroke-linejoin="round"/>
+  <circle cx="256" cy="256" r="44" fill="#7fe9d7"/>
+</svg>

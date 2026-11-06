@@ -42,9 +42,9 @@ small { font-size: 11px; }
 .skip-link { position: fixed; top: -70px; left: 15px; padding: 10px 16px; background: white; z-index: 100; border: 2px solid var(--accent); border-radius: 7px; }
 .skip-link:focus { top: 10px; }
 .topbar { height: 76px; position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 22px; padding: 0 30px; }
-.brand { display: flex; align-items: center; gap: 12px; width: 198px; flex-shrink: 0; color: var(--ink); font-size: 22px; line-height: 1.2; font-weight: 750; letter-spacing: -.5px; }
-.brand small { display: block; color: var(--muted); font-size: 8px; letter-spacing: 2.3px; margin-top: 5px; font-weight: 600; }
-.brand-mark, .modal-mark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; background: var(--accent); color: white; font-size: 28px; line-height: 1; font-weight: 600; letter-spacing: -2px; }
+.brand { display: flex; align-items: center; gap: 12px; width: 198px; flex-shrink: 0; color: var(--ink); font-size: 21px; line-height: 1.2; font-weight: 750; letter-spacing: -.3px; }
+.brand small { display: block; color: var(--muted); font-size: 8.5px; letter-spacing: 1.8px; margin-top: 4px; font-weight: 600; }
+.brand-mark, .modal-mark { display: block; width: 40px; height: 40px; flex-shrink: 0; filter: drop-shadow(0 1px 2px rgb(7 95 85 / 18%)); }
 .header-status, .header-actions, .inline-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .header-actions { margin-left: auto; flex-wrap: nowrap; }
 .button { display: inline-flex; justify-content: center; align-items: center; gap: 7px; padding: 8px 14px; min-height: 37px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-weight: 550; white-space: nowrap; transition: background .12s, border-color .12s; }
@@ -239,8 +239,8 @@ input[type="checkbox"] { margin: 2px 0 0; width: 17px; height: 17px; accent-colo
 @media (max-width: 800px) {
   .topbar { height: 66px; padding: 0 18px; gap: 14px; }
   .brand { width: auto; font-size: 19px; }
-  .brand-mark { width: 33px; height: 33px; font-size: 25px; }
-  .brand small { font-size: 7px; letter-spacing: 1.5px; }
+  .brand-mark { width: 33px; height: 33px; }
+  .brand small { font-size: 7.5px; letter-spacing: 1.4px; }
   .header-actions { gap: 2px; }
   .header-actions .button { padding-inline: 9px; font-size: 12px; }
   .header-status { gap: 4px; }
